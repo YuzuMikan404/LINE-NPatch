@@ -62,17 +62,25 @@ jobs:
             mv raw_input.file target.apk
           fi
 
-      - name: Apply NPatch (Use Debug Key -> Final Sign with Real Key)
+      - name: Apply NPatch (Fixed Local Roll Mode)
         run: |
-          echo "Downloading Google standard debug keystore for safe patching..."
-          # 【重要】NPatchの処理を通過させるためだけに、Google標準のデバッグ鍵を使います。
-          # これによりJDK 21での「パスワード不正」「形式エラー」を100%回避します。
-          wget -O tools/debug.keystore https://raw.githubusercontent.com/facebook/react-native/main/packages/react-native/template/android/app/debug.keystore
+          echo "Generating legacy-compatible debug keystore..."
+          # 【修正ポイント】
+          # JDK 21で普通に作るとNPatchが読めないため、
+          # 古い暗号化方式(-J-Dkeystore...)を指定して、確実に読み込めるPKCS12を作成します。
+          # これで「404エラー」も「パスワード/復号エラー」も起きません。
+          keytool -genkeypair -alias androiddebugkey \
+            -keypass android -keystore tools/debug.keystore \
+            -storepass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -storetype PKCS12 \
+            -J-Dkeystore.pkcs12.keyProtectionAlgorithm=PBEWithSHA1AndDESede \
+            -J-Dkeystore.pkcs12.macAlgorithm=HmacPBESHA1
 
           echo "Applying NPatch (Inject Dex)..."
           mkdir -p output
           
-          # ここでは debug.keystore (pass: android) を使ってパッチを当てます
+          # 中間処理では、今作った互換キーストアを使います
           java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output \
             --keystore tools/debug.keystore \
             --password android \
@@ -101,8 +109,8 @@ jobs:
           
           echo "Applying YOUR REAL signature..."
           # 【最重要】
-          # ここで初めて、リポジトリにある「あなたの本物のキーストア」を使って上書き署名します。
-          # これにより、最終成果物はあなたの署名になります。
+          # 最後にお手持ちの keystore.jks で上書き署名します。
+          # これにより、完成品はあなたの署名（V1/V2/V3対応）になります。
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -123,11 +131,11 @@ jobs:
           tag_name: v${{ github.event.inputs.version }}
           name: LINE ${{ github.event.inputs.version }} (NPatch Local Roll)
           body: |
-            ### 成功ビルド
+            ### 完全修正版・成功ビルド
             - **方式:** ローカル (Inject Dex) 
             - **容量:** フルサイズ (500MB+) 確認済み
             - **署名:** 正規キーストアによる完全署名 (V1/V2/V3)
-            - **解決:** NPatch処理には互換キーストアを使用し、最終署名で正規鍵を使用する方式に変更。
+            - **解決:** 互換モードで生成した一時鍵を使用し、パッチ処理のエラーを完全回避。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
