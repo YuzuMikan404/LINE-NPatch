@@ -2,20 +2,24 @@ name: LINE-NPatch Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Target Version (e.g., 15.12.2)'
+        required: true
+        default: '15.12.2'
 
 env:
-  # --- ここに直接設定を書き込んでください ---
-  STORE_PASSWORD: 'your_store_password'
-  KEY_PASSWORD: 'your_store_password'
-  KEY_ALIAS: 'key0'
-  KEYSTORE_FILE: 'keystore.jks'
   SOURCE_REPO: 'YuzuMikan404/LINE-APK'
-  # ---------------------------------------
+  KEYSTORE_FILE: 'keystore.jks'
+  # --- 直接入力セクション ---
+  STORE_PASSWORD: 'your_store_password'
+  KEY_ALIAS: 'key0'
+  KEY_PASSWORD: 'your_store_password'
+  # -----------------------
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # リリース作成のために書き込み権限を付与
     permissions:
       contents: write
 
@@ -26,14 +30,25 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          java-version: '17' # 互換性のために17を推奨
+          java-version: '17'
           distribution: 'temurin'
+
+      - name: Download APK from Source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ github.event.inputs.version_name }}
+        run: |
+          echo "Searching for version: $VER in $SOURCE_REPO"
+          # バージョン名（15.12.1など）を含むAPKをワイルドカードで検索してダウンロード
+          # *15.12.1*.apk というパターンで探します
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VER*.apk" --output target.apk
 
       - name: Patch with NPatch
         run: |
           mkdir -p output
           
-          # パスワード変数を "" で囲み、特殊文字を保護してJavaに渡す
+          # パスワードを "" で囲み、特殊文字（!や$）がbashで展開されるのを防ぐ
+          # これにより「パスワードは合っているのに通らない」問題を潰します
           java -Xmx4G -jar npatch.jar target.apk \
             --manager manager.apk \
             --injectdex \
@@ -46,25 +61,20 @@ jobs:
 
       - name: Prepare Final APK
         run: |
-          # 生成されたファイルを探して固定の名前に変更
-          PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
+          PATCHED_FILE=$(find output -name "*-npatched.apk" | head -n 1)
           if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::Output APK not found."
+            echo "::error::Output APK not found. Patching might have failed."
             exit 1
           fi
-          mv "$PATCHED_FILE" line-patched.apk
-          # リリース名に使うための日付を取得
-          echo "RELEASE_TAG=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+          # 出力ファイル名にバージョン名を入れる
+          mv "$PATCHED_FILE" "line-v${{ github.event.inputs.version_name }}-patched.apk"
+          echo "RELEASE_TAG=v${{ github.event.inputs.version_name }}-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: patch-${{ env.RELEASE_TAG }}
-          name: LINE Patched ${{ env.RELEASE_TAG }}
-          draft: false
-          prerelease: false
-          files: |
-            line-patched.apk
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: LINE Patched ${{ github.event.inputs.version_name }}
+          files: "line-v${{ github.event.inputs.version_name }}-patched.apk"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
