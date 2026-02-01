@@ -61,14 +61,20 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
-
       - name: Apply NPatch (Local Mode)
         run: |
-          # NPatchを実行
-          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex -f -o output
+          # 出力ディレクトリの作成
+          mkdir -p output
           
-          # 出力ファイル名が -lspatched.apk または -npatched.apk のいずれかになるため、lsで取得
-          PATCHED_LINE=$(ls output/target-*-patched.apk output/target-*-lspatched.apk 2>/dev/null | head -n 1)
+          # NPatchを実行 (--skip-sign を追加して内部署名エラーを回避)
+          # 注意: --skip-sign が利用できない古いバージョンの場合は、エラーを無視して続行します
+          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output || true
+          
+          # 複数の命名パターンに対応してファイルを取得
+          # 1. target-xxx-npatched.apk (最新版)
+          # 2. target-xxx-lspatched.apk (旧版)
+          # 3. target-xxx-patched.apk (汎用)
+          PATCHED_LINE=$(ls output/target-*-npatched.apk output/target-*-lspatched.apk output/target-*-patched.apk 2>/dev/null | head -n 1)
           
           if [ -z "$PATCHED_LINE" ]; then
             echo "Error: Patched APK not found."
@@ -76,7 +82,9 @@ jobs:
             exit 1
           fi
           
+          echo "Found patched APK: $PATCHED_LINE"
           mv "$PATCHED_LINE" target-patched.apk
+
 
       - name: Sign APK (Align & Sign)
         run: |
