@@ -1,0 +1,165 @@
+name: NPatch LINE
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'LINEのバージョン (例: 15.12.2)'
+        required: true
+
+env:
+  SOURCE_REPO: "YuzuMikan404/LINE-APK"
+  KEYSTORE_FILE: "keystore.jks"
+  STORE_PASSWORD: "your_store_password"
+  KEY_ALIAS: "key0"
+  KEY_PASSWORD: "your_store_password"
+
+jobs:
+  patch-line:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Cache Tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: tools
+          key: tools-apkeditor-1.4.7
+
+      - name: Download Tools (APKEditor)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tools
+          wget -O tools/APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+
+      - name: Download NPatch (7723mod)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p tools
+          echo "Fetching latest release from $NPATCH_REPO..."
+          
+          # 最新のタグを取得
+          LATEST_TAG=$(gh release list --repo "$NPATCH_REPO" --limit 1 --json tagName --jq '.[0].tagName')
+          echo "Latest NPatch version: $LATEST_TAG"
+          
+          # Jarファイルを取得 (名前をnpatch.jarに固定)
+          gh release download "$LATEST_TAG" --repo "$NPATCH_REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
+          
+          # Manager APKを取得 (パッチ時に参照するため)
+          # 存在しない場合にエラーにならないよう || true を付与し、ある場合のみダウンロード
+          gh release download "$LATEST_TAG" --repo "$NPATCH_REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found in release assets, proceeding without it."
+
+      - name: Download LINE APK/APKM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          mkdir download_tmp
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
+          
+          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
+          if [ -z "$FILE_PATH" ]; then
+            echo "Error: LINE APK version $VERSION not found."
+            exit 1
+          fi
+          mv "$FILE_PATH" raw_input.file
+          echo "Original filename: $(basename "$FILE_PATH")"
+
+      - name: Prepare APK (Merge Split APKs)
+        run: |
+          if unzip -l raw_input.file | grep -q "base.apk"; then
+            echo "Split APK detected. Merging..."
+            unzip -o raw_input.file -d splitted_apk
+            java -jar tools/APKEditor.jar m -i splitted_apk -o target.apk
+          else
+            echo "Single APK detected."
+            mv raw_input.file target.apk
+          fi
+
+      - name: Apply NPatch
+        run: |
+          echo "Running NPatch..."
+          mkdir -p output
+          
+          # コマンドライン引数の構築
+          # 7723mod版はLSPatchベースなので、--managerオプションが推奨される場合が多いです
+          CMD="java -jar tools/npatch.jar target.apk -f -o output"
+          
+          if [ -f "tools/manager.apk" ]; then
+            echo "Manager APK found, injecting..."
+            CMD="$CMD --manager tools/manager.apk"
+          fi
+          
+          # 実行
+          $CMD
+          
+          # 出力確認 (LSPatch系は output/xxxxx-patched.apk のように生成される)
+          PATCHED_APK=$(find output -name "*patched*.apk" | head -n 1)
+          
+          if [ -f "$PATCHED_APK" ]; then
+            mv "$PATCHED_APK" target-patched.apk
+            echo "Patch success."
+          else
+            echo "Error: Patch output not found."
+            ls -R output
+            exit 1
+          fi
+
+      - name: Check/Generate Keystore
+        run: |
+          if [ -f "$KEYSTORE_FILE" ]; then
+            echo "Keystore file found."
+          else
+            echo "Keystore file NOT found. Generating a debug keystore..."
+            keytool -genkey -v -keystore "$KEYSTORE_FILE" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Sign APK
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
+          
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$STORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --out signed_final.apk \
+            target-aligned.apk
+
+      - name: Rename Output
+        id: finalize
+        run: |
+          FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
+          mv signed_final.apk "$FINAL_NAME"
+          echo "filename=$FINAL_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}-npatch
+          name: LINE ${{ github.event.inputs.version }} (NPatch)
+          body: |
+            - **Version:** ${{ github.event.inputs.version }}
+            - **Method:** NPatch (7723mod)
+            - **Base:** [7723mod/NPatch](https://github.com/7723mod/NPatch)
+          files: ${{ steps.finalize.outputs.filename }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
