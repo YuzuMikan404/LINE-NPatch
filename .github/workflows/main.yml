@@ -92,22 +92,25 @@ jobs:
 
       - name: Zipalign and Sign APK
         run: |
-          # 1. Android Build Toolsのパスを取得
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
-          # 2. zipalignを実行 (パッチ済みAPKを整列)
+          # 1. zipalign
           "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
           
-          # 3. apksignerで署名
-          # 変数を '${{ env.VAR }}' とシングルクォートで囲むのがコツです
+          # 2. apksigner (余計なオプションを削除して署名)
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "${{ env.KEYSTORE_FILE }}" \
             --ks-pass pass:'${{ env.STORE_PASSWORD }}' \
             --ks-key-alias '${{ env.KEY_ALIAS }}' \
             --key-pass pass:'${{ env.KEY_PASSWORD }}' \
-            --min-sdk-version 26 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
             --out signed_final.apk \
             target-aligned.apk
+
+          # 3. 検証 (これが成功すればAPKとしては正常)
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose signed_final.apk
 
       - name: Finalize Filename
         run: |
