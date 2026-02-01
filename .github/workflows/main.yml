@@ -1,88 +1,105 @@
-name: LINE-NPatch Build and Release
+name: NPatch LINE
 
 on:
   workflow_dispatch:
     inputs:
-      version_name:
-        description: 'Target Version (e.g., 15.12.2)'
+      version:
+        description: 'LINEのバージョン (例: 15.12.2)'
         required: true
-        default: '15.12.2'
-
+        
 env:
-  SOURCE_REPO: 'YuzuMikan404/LINE-APK'
-  KEYSTORE_FILE: 'keystore.jks'
-  # --- 直接入力セクション ---
-  STORE_PASSWORD: 'your_store_password'
-  KEY_ALIAS: 'key0'
-  KEY_PASSWORD: 'your_store_password'
-  # -----------------------
+  SOURCE_REPO: "YuzuMikan404/LINE-APK"
+  KEYSTORE_FILE: "keystore.jks"
+  STORE_PASSWORD: "your_store_password"
+  KEY_ALIAS: "key0"
+  KEY_PASSWORD: "your_store_password"
 
 jobs:
-  build:
+  patch-line:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
-      - name: Download and Handle Complex Filename
+      - name: Download Tools (NPatch)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VER="${{ github.event.inputs.version_name }}"
-          echo "Target version: $VER"
+          REPO_NPATCH="7723mod/NPatch"
+          LATEST_TAG=$(gh release list --repo "$REPO_NPATCH" --limit 1 --json tagName --jq '.[0].tagName')
           
-          # 1. 複雑なファイル名でも指定バージョンが含まれるものを全てDL
-          gh release download --repo "$SOURCE_REPO" --pattern "*$VER*.apk"
+          # JAR (パッチャー) と APK (マネージャー) をダウンロード
+          # ファイル名が NPatch-v0.7.3-504-release.jar の形式に対応
+          gh release download "$LATEST_TAG" --repo "$REPO_NPATCH" --pattern "NPatch-*-release.jar" --output "npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo "$REPO_NPATCH" --pattern "NPatch-*-release.apk" --output "manager.apk" --clobber
           
-          # 2. DLしたファイルの中から最初に見つかったものを target.apk にリネーム
-          # これにより、ファイル名がどう複雑でも NPatch のコマンドに合わせられます
-          DOWNLOADED_APK=$(find . -name "*$VER*.apk" -type f | head -n 1)
-          if [ -z "$DOWNLOADED_APK" ]; then
-            echo "::error::No APK found for version $VER"
-            exit 1
-          fi
-          mv "$DOWNLOADED_APK" target.apk
-          echo "Renamed $DOWNLOADED_APK to target.apk"
+          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
+      - name: Download LINE APK/APKM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          mkdir download_tmp
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
+          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
+          mv "$FILE_PATH" raw_input.file
+
+      - name: Prepare APK
+        run: |
+          if unzip -l raw_input.file | grep -q "base.apk"; then
+            unzip -o raw_input.file -d splitted_apk
+            java -jar APKEditor.jar m -i splitted_apk -o target.apk
+          else
+            mv raw_input.file target.apk
+          fi      
+              
       - name: Patch with NPatch
         run: |
-          mkdir -p output
-          
-          # パスワードは必ず "$VAR" で囲み、記号を保護
+          # 1. NPatch実行
           java -Xmx4G -jar npatch.jar target.apk \
             --manager manager.apk \
             --injectdex \
             -f \
             -o output \
-            --keystore "$KEYSTORE_FILE" \
-            --storepass "$STORE_PASSWORD" \
-            --alias "$KEY_ALIAS" \
-            --keypass "$KEY_PASSWORD" || { echo "NPatch failed"; exit 1; }
+            --keystore "${{ env.KEYSTORE_FILE }}" \
+            --storepass "${{ env.STORE_PASSWORD }}" \
+            --alias "${{ env.KEY_ALIAS }}" \
+            --keypass "${{ env.KEY_PASSWORD }}"
 
-      - name: Prepare and Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 出力された複雑な名前のパッチ済みAPKを特定
-          PATCHED_FILE=$(find output -name "*-npatched.apk" | head -n 1)
+          # 2. 生成ファイルの確認
+          PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
+          
           if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::Output APK not found."
+            echo "::error::NPatch failed to generate the APK. Check the password and alias."
             exit 1
           fi
           
-          FINAL_NAME="line-v${{ github.event.inputs.version_name }}-patched.apk"
-          mv "$PATCHED_FILE" "$FINAL_NAME"
-          
-          TAG="v${{ github.event.inputs.version_name }}-$(date +'%Y%m%d%H%M')"
-          gh release create "$TAG" "$FINAL_NAME" \
-            --title "LINE Patched ${{ github.event.inputs.version_name }}" \
-            --notes "Original version: ${{ github.event.inputs.version_name }}"
+          mv "$PATCHED_FILE" signed_final.apk
+
+      - name: Finalize Filename
+        run: |
+          # 入力されたバージョン名を使ってリネーム
+          mv signed_final.apk "LINE-${{ github.event.inputs.version }}-NPatch.apk"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.event.inputs.version }}-npatch"
+          name: "LINE ${{ github.event.inputs.version }} (NPatch)"
+          body: |
+            - **Tool:** NPatch (Neo LSPatch)
+            - **Mode:** Local
+            - **Method:** Inject Dex
+          files: "LINE-${{ github.event.inputs.version }}-NPatch.apk"
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
