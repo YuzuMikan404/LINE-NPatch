@@ -39,7 +39,8 @@ jobs:
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK – proceeding without"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
-
+        env:
+          GH_TOKEN: ${{ github.token }}   # ← これを追加！（これで gh が認証される）
       - name: Download LINE APK
         run: |
           mkdir -p download_tmp
