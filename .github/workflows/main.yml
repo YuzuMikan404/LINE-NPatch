@@ -27,6 +27,17 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Verify keystore
+        run: |
+          if [ ! -f "$KEYSTORE_FILE" ]; then 
+            echo "keystore.jks missing!" 
+            exit 1
+          fi
+          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" || exit 1
+        env:
+          KEYSTORE_FILE: keystore.jks
+          STORE_PASSWORD: your_store_password
+
       - name: Download NPatch
         run: |
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName' || echo "v0.7.3")
@@ -57,65 +68,60 @@ jobs:
           SOURCE_REPO: YuzuMikan404/LINE-APK
           VERSION: ${{ github.event.inputs.version }}
           GH_TOKEN: ${{ github.token }}
-
-      - name: Create Keystore
-        run: |
-          # 新しいkeystoreを作成（パスワードなし、デバッグ用）
-          keytool -genkeypair -v \
-            -keystore release.keystore \
-            -alias release \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
           
-          ls -lh release.keystore
-          
-      - name: Patch with NPatch (without signing)
+      - name: Patch with NPatch
         run: |
-          echo "Patching..."
-          # NPatchで署名なしでパッチ適用
+          echo "Patching with NPatch..."
+          
+          # NPatchでパッチ適用（keystore.jksを使用）
           if [ -f npatch-manager.apk ] && [ -s npatch-manager.apk ]; then
-            java -Xmx4G -jar npatch.jar target.apk --manager npatch-manager.apk --injectdex -f --nosign -o output
+            java -Xmx4G -jar npatch.jar target.apk \
+              --manager npatch-manager.apk \
+              --injectdex \
+              -f \
+              --keystore "$KEYSTORE_FILE" \
+              --keystore-pass "$STORE_PASSWORD" \
+              --alias "$KEY_ALIAS" \
+              --alias-pass "$KEY_PASSWORD" \
+              -o output
           else
-            java -Xmx4G -jar npatch.jar target.apk --injectdex -f --nosign -o output
+            java -Xmx4G -jar npatch.jar target.apk \
+              --injectdex \
+              -f \
+              --keystore "$KEYSTORE_FILE" \
+              --keystore-pass "$STORE_PASSWORD" \
+              --alias "$KEY_ALIAS" \
+              --alias-pass "$KEY_PASSWORD" \
+              -o output
           fi
 
-          PATCHED=$(ls output/*.apk 2>/dev/null | head -n 1)
+          # パッチ適用済みAPKを探す
+          PATCHED=$(find output -name "*.apk" -type f 2>/dev/null | head -n 1)
           if [ -z "$PATCHED" ]; then
-            echo "パッチ適用されたAPKが見つかりません"
+            echo "エラー: パッチ適用されたAPKが見つかりません"
+            echo "outputディレクトリの内容:"
             ls -la output/ || echo "outputディレクトリが存在しません"
             exit 1
           fi
           
-          mv "$PATCHED" target-patched.apk
-          echo "パッチ適用済みAPK:"
-          ls -lh target-patched.apk
+          mv "$PATCHED" patched_signed.apk
+          echo "パッチ適用・署名済みAPK:"
+          ls -lh patched_signed.apk
+        env:
+          KEYSTORE_FILE: keystore.jks
+          STORE_PASSWORD: your_store_password
+          KEY_ALIAS: key0
+          KEY_PASSWORD: your_store_password
 
-      - name: Zipalign and Sign APK
+      - name: Verify APK Signature
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           echo "Build-tools: $BUILD_TOOLS_DIR"
           
-          # Zipalign
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
-          
-          # 署名
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks release.keystore \
-            --ks-pass pass:android \
-            --ks-key-alias release \
-            --key-pass pass:android \
-            --out signed_final.apk \
-            target-aligned.apk
-          
           # 署名検証
-          "$BUILD_TOOLS_DIR/apksigner" verify -v signed_final.apk
+          "$BUILD_TOOLS_DIR/apksigner" verify -v patched_signed.apk
           
-          echo "署名済みAPK:"
-          ls -lh signed_final.apk
+          echo "署名検証成功！"
 
       - name: Finalize Filename
         run: |
@@ -127,7 +133,7 @@ jobs:
           
           echo "最終ファイル名: $FINAL_NAME"
           
-          mv signed_final.apk "$FINAL_NAME"
+          mv patched_signed.apk "$FINAL_NAME"
           
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
           
@@ -144,16 +150,11 @@ jobs:
             - **Patcher Version:** NPatch v${{ env.PATCHER_VERSION }}
             - **Patch Mode:** Local Dex Injection
             - **Build Date:** $(date +%Y-%m-%d)
-            - **Signing:** Release keystore (test key)
             
             ### インストール方法
             1. 既存のLINEアプリをアンインストール（データバックアップ推奨）
             2. このAPKをダウンロードしてインストール
             3. 初回起動時に権限を許可
-            
-            ### 注意事項
-            - テスト用の署名キーを使用しています
-            - 公式LINEとは署名が異なるため上書きインストールはできません
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
           draft: false
