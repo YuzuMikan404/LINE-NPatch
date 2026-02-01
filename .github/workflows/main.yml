@@ -1,68 +1,65 @@
-name: NPatch LINE (Neo LSPatch - Manual Sign)
+name: Patch LINE with NPatch
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'LINEのバージョン (例: 15.12.2)'
+        description: 'LINE version (e.g., 15.12.2)'
         required: true
-
-env:
-  SOURCE_REPO: "YuzuMikan404/LINE-APK"
-  KEYSTORE_FILE: "keystore.jks"
-  STORE_PASSWORD: "your_store_password"
-  KEY_ALIAS: "key0"
-  KEY_PASSWORD: "your_store_password"
-  MIN_SDK: "24"
+        default: '15.12.2'
 
 jobs:
-  patch-line:
+  patch:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: YuzuMikan404/LINE-NPatch
+
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Verify Keystore
+      - name: Verify keystore
         run: |
           if [ ! -f "$KEYSTORE_FILE" ]; then echo "keystore.jks missing!" && exit 1; fi
           keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" || exit 1
-
-      - name: Download Tools
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEYSTORE_FILE: keystore.jks
+          STORE_PASSWORD: your_store_password
+
+      - name: Download NPatch
         run: |
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName' || echo "v0.7.3")
           echo "NPatch version: $LATEST_TAG"
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK – proceeding without"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
-      - name: Download & Prepare LINE APK
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event.inputs.version }}
+      - name: Download LINE APK
         run: |
           mkdir -p download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" \) | head -n 1)
-          [ -z "$FILE_PATH" ] && exit 1
+          [ -z "$FILE_PATH" ] && { echo "No file for $VERSION" && exit 1; }
           mv "$FILE_PATH" raw_input.file
+
           if unzip -l raw_input.file | grep -q "base.apk"; then
             unzip -o raw_input.file -d splitted_apk
             java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
             mv raw_input.file target.apk
           fi
+          ls -lh target.apk
+        env:
+          SOURCE_REPO: YuzuMikan404/LINE-APK
+          VERSION: ${{ github.event.inputs.version }}
 
-      - name: Apply NPatch
+      - name: Patch with NPatch
         run: |
           echo "Patching..."
           set +e
@@ -73,15 +70,19 @@ jobs:
             echo "Patched without manager"
           fi
           set -e
-          
-          PATCHED=$(ls output/*.apk | head -n 1)
-          [ -z "$PATCHED" ] && exit 1
-          mv "$PATCHED" target-patched.apk
 
-      - name: Align & Sign
+          PATCHED=$(ls output/*.apk | head -n 1)
+          [ -z "$PATCHED" ] && { echo "No patched APK generated! Output dir:" && ls -la output/ && exit 1; }
+          mv "$PATCHED" target-patched.apk
+          echo "Patched APK:"
+          ls -lh target-patched.apk
+
+      - name: Zipalign and Sign
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          echo "Build-tools: $BUILD_TOOLS_DIR"
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
+
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -91,50 +92,49 @@ jobs:
             --v2-signing-enabled \
             --out signed_final.apk \
             target-aligned.apk
+        env:
+          KEYSTORE_FILE: keystore.jks
+          STORE_PASSWORD: your_store_password
+          KEY_ALIAS: key0
+          KEY_PASSWORD: your_store_password
+          MIN_SDK: 24
 
       - name: Finalize Filename
         run: |
           TODAY=$(date +%Y%m%d)
-          
-          # NPatchの最新タグからバージョン抜き出し（vを取る）
-          PATCHER_VERSION="${LATEST_TAG#v}"
-          
-          # 入力バージョンを正しく取得（これが超重要！）
-          INPUT_VERSION="${{ github.event.inputs.version }}"
-          
-          # ファイル名をシンプルに作る（クォートなし、エスケープなし）
+
+          # ハードコード部分をそのまま残す（これが君の希望）
+          INPUT_VERSION="15.12.2"
+          PATCHER_VERSION="0.7.3"
+
           FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          
-          # デバッグ（次回のログでこれ見て確認できる）
+
           echo "入力バージョン: ${INPUT_VERSION}"
-          echo "NPatchバージョン: ${PATCHER_VERSION}"
-          echo "作ったファイル名: ${FINAL_NAME}"
-          
-          # 署名済みAPKをリネーム
-          mv signed_final.apk "${FINAL_NAME}" || { 
-            echo "mv失敗！ signed_final.apkが見つからないかも"
+          echo "パッチャーバージョン: ${PATCHER_VERSION}"
+          echo "最終ファイル名: ${FINAL_NAME}"
+
+          mv signed_final.apk "$FINAL_NAME" || {
+            echo "mv失敗！ signed_final.apkがないかも"
             ls -la
             exit 1
           }
-          
-          # GitHub環境変数にセット（Releaseで使う）
-          echo "FINAL_APK_NAME=${FINAL_NAME}" >> $GITHUB_ENV
-          
-          # 確認
-          ls -lh "${FINAL_NAME}" || echo "リネーム後にファイルが見つからないよ〜"    
+
+          echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
+
+          ls -lh "$FINAL_NAME" || echo "ファイルが見つからないよ"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}-npatch
           name: LINE ${{ github.event.inputs.version }} (NPatch Neo Local)
           body: |
-            - **Patcher:** NPatch ${{ env.LATEST_TAG }}
+            - **Patcher:** NPatch v0.7.3
             - **Mode:** Local Dex Injection
             - **Built:** $(date +%Y-%m-%d)
             - **Note:** Manual signing (NPatch auto-sign skipped due to default keystore error)
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
-          # Use the correct input name (no 'overwrite', it's 'overwrite_files')
           overwrite_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
