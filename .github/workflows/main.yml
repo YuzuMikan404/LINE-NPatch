@@ -1,4 +1,4 @@
-Name: NPatch LINE
+name: NPatch LINE
 
 on:
   workflow_dispatch:
