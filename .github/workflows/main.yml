@@ -33,22 +33,31 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Download APK from Source
+      - name: Download and Handle Complex Filename
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VER: ${{ github.event.inputs.version_name }}
         run: |
-          echo "Searching for version: $VER in $SOURCE_REPO"
-          # バージョン名（15.12.1など）を含むAPKをワイルドカードで検索してダウンロード
-          # *15.12.1*.apk というパターンで探します
-          gh release download --repo "$SOURCE_REPO" --pattern "*$VER*.apk" --output target.apk
+          VER="${{ github.event.inputs.version_name }}"
+          echo "Target version: $VER"
+          
+          # 1. 複雑なファイル名でも指定バージョンが含まれるものを全てDL
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VER*.apk"
+          
+          # 2. DLしたファイルの中から最初に見つかったものを target.apk にリネーム
+          # これにより、ファイル名がどう複雑でも NPatch のコマンドに合わせられます
+          DOWNLOADED_APK=$(find . -name "*$VER*.apk" -type f | head -n 1)
+          if [ -z "$DOWNLOADED_APK" ]; then
+            echo "::error::No APK found for version $VER"
+            exit 1
+          fi
+          mv "$DOWNLOADED_APK" target.apk
+          echo "Renamed $DOWNLOADED_APK to target.apk"
 
       - name: Patch with NPatch
         run: |
           mkdir -p output
           
-          # パスワードを "" で囲み、特殊文字（!や$）がbashで展開されるのを防ぐ
-          # これにより「パスワードは合っているのに通らない」問題を潰します
+          # パスワードは必ず "$VAR" で囲み、記号を保護
           java -Xmx4G -jar npatch.jar target.apk \
             --manager manager.apk \
             --injectdex \
@@ -59,22 +68,21 @@ jobs:
             --alias "$KEY_ALIAS" \
             --keypass "$KEY_PASSWORD" || { echo "NPatch failed"; exit 1; }
 
-      - name: Prepare Final APK
-        run: |
-          PATCHED_FILE=$(find output -name "*-npatched.apk" | head -n 1)
-          if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::Output APK not found. Patching might have failed."
-            exit 1
-          fi
-          # 出力ファイル名にバージョン名を入れる
-          mv "$PATCHED_FILE" "line-v${{ github.event.inputs.version_name }}-patched.apk"
-          echo "RELEASE_TAG=v${{ github.event.inputs.version_name }}-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
-
-      - name: Create Release and Upload
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: LINE Patched ${{ github.event.inputs.version_name }}
-          files: "line-v${{ github.event.inputs.version_name }}-patched.apk"
+      - name: Prepare and Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 出力された複雑な名前のパッチ済みAPKを特定
+          PATCHED_FILE=$(find output -name "*-npatched.apk" | head -n 1)
+          if [ -z "$PATCHED_FILE" ]; then
+            echo "::error::Output APK not found."
+            exit 1
+          fi
+          
+          FINAL_NAME="line-v${{ github.event.inputs.version_name }}-patched.apk"
+          mv "$PATCHED_FILE" "$FINAL_NAME"
+          
+          TAG="v${{ github.event.inputs.version_name }}-$(date +'%Y%m%d%H%M')"
+          gh release create "$TAG" "$FINAL_NAME" \
+            --title "LINE Patched ${{ github.event.inputs.version_name }}" \
+            --notes "Original version: ${{ github.event.inputs.version_name }}"
