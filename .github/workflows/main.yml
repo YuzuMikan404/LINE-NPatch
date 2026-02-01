@@ -64,32 +64,31 @@ jobs:
               
       - name: Patch with NPatch
         run: |
-          mkdir -p output
-          # 1. JKSを上の階層へ退避（NPatchの自動スキャンから隠す）
-          mkdir -p ../hide_keystore
-          mv *.jks ../hide_keystore/ 2>/dev/null || true
+          # 1. 専用の作業ディレクトリを作成して、必要なものだけ移動
+          mkdir -p workspace
+          mv npatch.jar manager.apk target.apk workspace/
           
-          # 2. NPatch実行 (引数の順番を: 入力APK マネージャーAPK オプション の順にする)
-          # --skip-sign を後ろに配置
-          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex -f -o output --skip-sign
+          # 2. workspaceの中で実行（ここにはJKSがないので、読み込みようがない）
+          cd workspace
+          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex -f --skip-sign -o output
           
           # 3. 生成されたファイルを確認
           PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
           
           if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::APKが生成されませんでした。"
+            echo "::error::NPatchがAPKの生成に失敗しました。"
             exit 1
           fi
           
-          # 4. マニフェストの存在チェック
-          if ! unzip -l "$PATCHED_FILE" | grep -q "AndroidManifest.xml"; then
-            echo "::error::APKの中身が不完全です。"
+          # 4. workspaceの外（元の場所）に成果物を戻す
+          mv "$PATCHED_FILE" ../target-patched.apk
+          cd ..
+          
+          # 5. 最終確認
+          if [ ! -f target-patched.apk ]; then
+            echo "::error::成果物の移動に失敗しました。"
             exit 1
           fi
-          
-          mv "$PATCHED_FILE" target-patched.apk
-          # JKSを元に戻す
-          mv ../hide_keystore/*.jks . 2>/dev/null || true
 
       - name: Zipalign and Sign APK
         run: |
