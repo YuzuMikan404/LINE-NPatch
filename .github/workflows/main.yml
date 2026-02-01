@@ -51,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.event.inputs.version }}
 
-      - name: Prepare APK (Merge to Full Size)
+      - name: Prepare APK (Merge & Clean Signature)
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
             echo "Merging Split APKs to maintain 500MB+ size..."
@@ -60,23 +60,26 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
+          
+          # 【最重要：署名情報の完全削除】
+          # マージされたAPKに残っている古い署名データを消去します。
+          # これをしないとNPatchが解析エラー(tag type 0)で自爆し、264MBの不完全なAPKになります。
+          zip -d target.apk "META-INF/*.SF" "META-INF/*.RSA" "META-INF/*.MF" || true
 
-      - name: Apply NPatch (Force Core Patching)
+      - name: Apply NPatch (True Local Roll Mode)
         run: |
-          echo "Applying NPatch without internal signing..."
+          echo "Applying NPatch (Core Patching ONLY)..."
           mkdir -p output
           
-          # 【最大の変更点】
-          # NPatch内部の署名エンジンはJava 21と相性が悪いため、--skip-sign を使い、
-          # さらにエラーが出ても無視して次に進む設定 (|| true) にします。
-          # 実はNPatchは署名登録に失敗しても、Dexの注入自体は先行して完了している場合が多いです。
-          java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output --skip-sign || true
+          # 内部署名をスキップし、パッチ（Dex注入）のみを確実に実行させます。
+          # 直前で署名を消しているため、エラーなくフルサイズ(500MB+)で出力されます。
+          java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output --skip-sign
 
-          # 出力されたファイルを特定
+          # 出力ファイルを特定
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
           if [ -z "$PATCHED_FILE" ]; then
-             echo "NPatch failed to create output!"
-             exit 1
+            echo "Error: NPatch output not found!"
+            exit 1
           fi
           mv "$PATCHED_FILE" target-patched-unsigned.apk
 
@@ -88,17 +91,16 @@ jobs:
           echo "Zipaligning..."
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched-unsigned.apk target-aligned.apk
           
-          # 最終サイズ確認（統合に失敗して264MBになっていないかチェック）
+          # サイズ最終チェック
           SIZE=$(stat -c%s "target-aligned.apk")
           echo "Final APK size: $SIZE bytes"
           if [ $SIZE -lt 450000000 ]; then
-            echo "Error: Patched APK is too small ($SIZE)! Merging failed."
+            echo "Error: Patched APK is too small ($SIZE)! Merging was not successful."
             exit 1
           fi
 
-          echo "Applying YOUR REAL signature with official apksigner..."
-          # NPatchを完全に介さず、Android公式の apksigner であなたの鍵を直接適用します。
-          # これが最も確実で安全、かつ高品質な署名方法です。
+          echo "Applying YOUR REAL signature with apksigner..."
+          # ここで初めて、あなたの本物のキーストアで署名。Android 15までの互換性を確保。
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -119,11 +121,11 @@ jobs:
           tag_name: v${{ github.event.inputs.version }}
           name: LINE ${{ github.event.inputs.version }} (NPatch Local Roll)
           body: |
-            ### ついに完成・100点満点ビルド
+            ### 最終解決・最高品質ビルド
             - **方式:** ローカル統合 (Inject Dex) 
-            - **容量:** フルサイズ (500MB+) 確認済み
-            - **署名:** リポジトリの正規キーストアによる完全署名 (V1/V2/V3)
-            - **修正:** NPatch内蔵署名ツールのバグを「完全にスキップ」し、公式ツールで署名し直すことで克服。
+            - **容量:** フルサイズ (500MB+) 成功
+            - **署名:** 本物キーストアによる正規署名 (V1/V2/V3)
+            - **修正:** マージ済みAPKから署名を除去してからパッチを当てることで、NPatchの解析バグを回避。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
