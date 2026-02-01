@@ -96,11 +96,12 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
           PATCHER_VERSION="${LATEST_TAG#v}"
-          VERSION="${{ github.event.inputs.version }}"
-          FINAL_NAME="LINE-\( {VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          mv signed_final.apk "$FINAL_NAME"
+          # Correctly capture the input version (this works reliably)
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
+          mv signed_final.apk "$FINAL_NAME" || { echo "mv failed – signed_final.apk missing?" && ls -la && exit 1; }
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME" || echo "mv failed – check if signed_final.apk exists"
+          ls -lh "$FINAL_NAME" || echo "File not found after mv"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -114,6 +115,7 @@ jobs:
             - **Note:** Manual signing (NPatch auto-sign skipped due to default keystore error)
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
-          overwrite: true  # 同タグで上書き（overwrite_files ではなく overwrite）
+          # Use the correct input name (no 'overwrite', it's 'overwrite_files')
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
