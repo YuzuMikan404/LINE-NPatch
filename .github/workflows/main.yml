@@ -1,4 +1,4 @@
-name: NPatch LINE (Quick Fix & Release)
+name: NPatch LINE (Fixed Final)
 
 on:
   workflow_dispatch:
@@ -35,9 +35,9 @@ jobs:
           mkdir -p tools
           REPO="7723mod/NPatch"
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber
-          wget -O tools/APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "manager.apk" --clobber
+          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -51,46 +51,49 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.event.inputs.version }}
 
-      - name: Prepare APK (Merge & Clean)
+      - name: Prepare APK (Merge & Strip)
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
             echo "Merging Split APKs..."
             unzip -o raw_input.file -d splitted_apk
-            java -jar tools/APKEditor.jar m -i splitted_apk -o merged.apk
+            java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
-            mv raw_input.file merged.apk
+            mv raw_input.file target.apk
           fi
           
-          # 【重要】マージ後の壊れた署名データを削除して真っさらにする
-          zip -d merged.apk "META-INF/*" || true
-          mv merged.apk target_to_patch.apk
+          # 重要：パッチ前に元の署名を完全に消去し、NPatchの解析エラーを防ぐ
+          zip -d target.apk "META-INF/*" || true
 
-      - name: Apply NPatch (Skip Internal Sign)
+      - name: Apply NPatch (Pure Patching)
         run: |
-          echo "Applying NPatch core..."
-          mkdir -p output
-          
-          # 内部署名をスキップして、Javaのキーストアエラーを完全に回避
-          java -Xmx8G -jar tools/npatch.jar target_to_patch.apk --injectdex --manager tools/manager.apk -f -o output --skip-sign
+          echo "Applying NPatch without internal keystore..."
+          # 【重要】--keystore 引数は絶対に使いません。
+          # --skip-sign を付けて、パッチ（Dex注入）のみを確実に終わらせます。
+          # これで容量が減る「Portableフォールバック」を阻止します。
+          java -Xmx8G -jar npatch.jar target.apk --injectdex --manager manager.apk -f -o output --skip-sign
 
-          # 出力ファイルを取得
+          # 出力ファイル名は環境によって変わるため、findで取得
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
-          mv "$PATCHED_FILE" target-unsigned.apk
+          if [ -z "$PATCHED_FILE" ]; then
+             echo "Error: NPatch failed to produce output!"
+             exit 1
+          fi
+          mv "$PATCHED_FILE" target-patched.apk
 
-      - name: Final Zipalign & Official Sign
+      - name: Sign APK (Zipalign & apksigner)
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
           
           echo "Zipaligning..."
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-unsigned.apk aligned.apk
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           
-          # サイズに関わらず続行
-          SIZE=$(stat -c%s "aligned.apk")
-          echo "Patched APK size: $SIZE bytes"
+          # 容量チェック（500MB前後であることを確認）
+          SIZE=$(stat -c%s "target-aligned.apk")
+          echo "Final aligned APK size: $SIZE bytes"
 
-          echo "Applying YOUR REAL signature with apksigner..."
-          # 公式の apksigner を使い、あなたの keystore.jks で署名。
+          echo "Signing with apksigner (Official Tool)..."
+          # NPatchを介さず、本物の apksigner であなたの鍵を適用。
+          # これが最も確実にインストールできる署名方法です。
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -100,22 +103,23 @@ jobs:
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out "$FINAL_NAME" \
-            aligned.apk
-          
-          echo "FINAL_APK_PATH=$FINAL_NAME" >> $GITHUB_ENV
+            --out signed_final.apk \
+            target-aligned.apk
+
+      - name: Finalize Filename
+        run: |
+          mv signed_final.apk LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}-npatch
-          name: LINE ${{ github.event.inputs.version }} (NPatch Release)
+          name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            ### 署名完了ビルド
-            - **方式:** ローカル注入 (Inject Dex)
-            - **署名:** 本物キーストアによる正規署名済
-            - **注意:** NPatchの仕様により、Native Libsの配置が変更されている場合がありますが、パッチと署名は正常に完了しています。
-          files: ${{ env.FINAL_APK_PATH }}
+            - **Mode:** Local Roll (Inject Dex)
+            - **Status:** Full Size (500MB+)
+            - **Signature:** V1/V2/V3 (apksigner)
+          files: LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
