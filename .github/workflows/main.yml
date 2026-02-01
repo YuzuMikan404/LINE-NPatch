@@ -1,4 +1,4 @@
-name: NPatch LINE (7723mod)
+name: NPatch LINE (Own Key)
 
 on:
   workflow_dispatch:
@@ -6,10 +6,13 @@ on:
       version:
         description: 'LINEのバージョン (例: 15.12.2)'
         required: true
+        default: '15.12.2'
 
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
+  # リポジトリ内の鍵を使用
   KEYSTORE_FILE: "keystore.jks"
+  # パスワードが "your_store_password" でない場合は書き換えてください
   STORE_PASSWORD: "your_store_password"
   KEY_ALIAS: "key0"
   KEY_PASSWORD: "your_store_password"
@@ -23,10 +26,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      # NPatchの互換性のため JDK 17 を使用 (JDK 21での署名エラー回避)
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: '17'
           distribution: 'temurin'
 
       - name: Cache Tools
@@ -47,11 +51,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p tools
-          # リポジトリを固定
           REPO="7723mod/NPatch"
           echo "Fetching latest release from $REPO..."
           
-          # 最新タグを取得
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
           
           if [ -z "$LATEST_TAG" ]; then
@@ -61,7 +63,6 @@ jobs:
           
           echo "Latest NPatch version: $LATEST_TAG"
           
-          # JarとApkをダウンロード
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found, skipping."
 
@@ -117,33 +118,31 @@ jobs:
             exit 1
           fi
 
-      - name: Check/Generate Keystore
+      - name: Sign APK (With Your Keystore)
         run: |
-          if [ -f "$KEYSTORE_FILE" ]; then
-            echo "Keystore file found."
-          else
-            echo "Keystore file NOT found. Generating a debug keystore..."
-            keytool -genkey -v -keystore "$KEYSTORE_FILE" \
-              -alias "$KEY_ALIAS" \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
-              -dname "CN=Android Debug,O=Android,C=US"
+          # リポジトリ内の鍵があるか確認
+          if [ ! -f "$KEYSTORE_FILE" ]; then
+             echo "Error: $KEYSTORE_FILE not found in repository!"
+             exit 1
           fi
 
-      - name: Sign APK
-        run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
           echo "Zipaligning..."
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           
-          echo "Signing..."
+          echo "Signing with repository keystore..."
+          # JDK 17環境下で既存のJKS/PKCS12鍵を使って署名
+          # インストール互換性のため v1/v2/v3 すべて有効化
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" \
             --key-pass pass:"$KEY_PASSWORD" \
-            --min-sdk-version 27 \
+            --min-sdk-version 26 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
             --out signed_final.apk \
             target-aligned.apk
 
@@ -157,7 +156,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # タグ名をシンプルに変更 (例: v15.12.2)
           tag_name: v${{ github.event.inputs.version }}
           name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
