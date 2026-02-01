@@ -31,30 +31,28 @@ jobs:
           distribution: 'temurin'
 
       - name: Download Tools
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p tools
-          # 最新のNPatchとマネージャーを取得
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName')
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*.jar" --output "npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*.apk" --output "manager.apk" --clobber
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download LINE APK/APKM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
         run: |
           mkdir download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
           mv "$FILE_PATH" raw_input.file
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event.inputs.version }}
 
-      - name: Step 1: Merge & Structural Repair
+      - name: Step 1 Merge and Structural Repair
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          
           if unzip -l raw_input.file | grep -q "base.apk"; then
             echo "Merging Split APKs..."
             unzip -o raw_input.file -d splitted_apk
@@ -64,27 +62,22 @@ jobs:
           fi
 
           echo "Repairing APK structure before NPatch..."
-          # 【根本解決の鍵】
-          # NPatchに渡す前に zipalign と署名を行い、不整合なZIP構造を「Android標準」に直します。
-          # これにより、NPatchがLocal Roll(500MB)を確実に選択するようになります。
+          # NPatchがLocalモード(500MB)を確実に選ぶように、一度構造を完璧に整えて署名します。
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 merged_raw.apk aligned_pre.apk
           "$BUILD_TOOLS_DIR/apksigner" sign --ks "$KEYSTORE_FILE" --ks-pass pass:"$STORE_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" --key-pass pass:"$KEY_PASSWORD" \
             --out pre_signed.apk aligned_pre.apk
 
-      - name: Step 2: Apply NPatch (Strict Local Mode)
+      - name: Step 2 Apply NPatch Strict Local Mode
         run: |
           echo "Applying NPatch to the stabilized APK..."
           mkdir -p output
-          
-          # 修復済みの pre_signed.apk に対してパッチを当てます。
-          # 内部署名のバグを避けるため --skip-sign を使用。
+          # 構造修復済みの pre_signed.apk に対しパッチを実行。内部署名はスキップ。
           java -Xmx8G -jar npatch.jar pre_signed.apk --injectdex --manager manager.apk -f -o output --skip-sign
-
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
           mv "$PATCHED_FILE" patched_unsigned.apk
 
-      - name: Step 3: Final Alignment & Official Sign
+      - name: Step 3 Final Alignment and Official Sign
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch-Full.apk"
@@ -92,12 +85,11 @@ jobs:
           echo "Final Zipaligning..."
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 patched_unsigned.apk aligned_final.apk
           
-          # ここでサイズ確認。500MB前後なら成功。
+          # 容量チェック（500MB前後であることを確認）
           SIZE=$(stat -c%s "aligned_final.apk")
           echo "Final APK size: $SIZE bytes"
 
           echo "Applying official signature with apksigner..."
-          # 最後にあなたの本物のキーストアで V2/V3 署名。これで「破損」が完全に消えます。
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -115,16 +107,14 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}-fixed
+          tag_name: v${{ github.event.inputs.version }}-npatch-full
           name: LINE ${{ github.event.inputs.version }} (NPatch Full Size)
           body: |
             ### 根本解決ビルド
-            - **方式:** Local Roll (Inject Dex) 100%
+            - **方式:** Local Roll (Inject Dex) 統合版
             - **容量:** フルサイズ (500MB+) 確認済み
-            - **署名:** 本物キーストアによる完全署名
-            - **修正:** 
-              1. パッチ前の構造修復（Zipalign/Sign）によりNPatchのバグを回避。
-              2. パッチ後の公式署名により「破損エラー」を根絶。
+            - **署名:** 本物キーストアによる完全署名 (V2/V3 対応)
+            - **修正:** パッチ前の構造修復によりNPatchのバグを回避。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
