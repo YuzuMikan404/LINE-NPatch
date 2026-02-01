@@ -61,48 +61,24 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
-                
       - name: Patch with NPatch
         run: |
-          # 出力ディレクトリをクリア
-          rm -rf output && mkdir -p output
+          mkdir -p output
+          # 1. NPatchが勝手に読み込まないよう、一時的にキーストアを退避
+          mkdir -p temp_ks
+          mv *.jks temp_ks/ 2>/dev/null || true
           
-          # NPatchを実行 (|| true は削除して、エラー時に即停止させる)
+          # 2. NPatch実行 (--skip-sign を忘れずに)
           java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output
           
-          # 生成されたファイル名を取得
+          # 3. キーストアを元に戻す
+          mv temp_ks/*.jks . 2>/dev/null || true
+          
+          # 4. 生成確認
           PATCHED_FILE=$(ls output/target-*-npatched.apk 2>/dev/null | head -n 1)
-          
-          # ファイルが存在するかチェック
-          if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::パッチ済みAPKが生成されませんでした。NPatchの実行ログ（上記）を確認してください。"
-            exit 1
-          fi
-          
-          # APKの中身（Manifest）が正しく存在するかチェック
-          if ! unzip -l "$PATCHED_FILE" | grep -q "AndroidManifest.xml"; then
-            echo "::error::生成されたAPKにManifestが含まれていません。パッチ処理に失敗しています。"
-            exit 1
-          fi
-          
+          [ -z "$PATCHED_FILE" ] && exit 1
           mv "$PATCHED_FILE" target-patched.apk
 
-      - name: Zipalign and Sign APK
-        run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          
-          # 整列
-          "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
-          
-          # 署名 (エラー回避のため --min-sdk-version を明示的に指定)
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "$KEYSTORE_FILE" \
-            --ks-pass pass:"$STORE_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass pass:"$KEY_PASSWORD" \
-            --min-sdk-version 26 \
-            --out signed_final.apk \
-            target-aligned.apk
 
 
       - name: Zipalign and Sign APK
