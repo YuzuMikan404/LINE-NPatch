@@ -43,7 +43,7 @@ jobs:
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK – proceeding without"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
         env:
-          GH_TOKEN: ${{ github.token }}   # ← これを追加！（これで gh が認証される）
+          GH_TOKEN: ${{ github.token }}
     
       - name: Download LINE APK
         run: |
@@ -63,7 +63,7 @@ jobs:
         env:
           SOURCE_REPO: YuzuMikan404/LINE-APK
           VERSION: ${{ github.event.inputs.version }}
-          GH_TOKEN: ${{ github.token }}   # ← これを追加！これで gh が動く
+          GH_TOKEN: ${{ github.token }}
           
       - name: Patch with NPatch
         run: |
@@ -109,11 +109,11 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
 
-          INPUT_VERSION="15.12.2"
+          INPUT_VERSION="${{ github.event.inputs.version }}"
           PATCHER_VERSION="0.7.3"
 
-          # これだけ変える！ 変数展開を正しく
-          FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
+          # 正しい変数展開構文を使用
+          FINAL_NAME="LINE-${INPUT_VERSION}-NPatch-v${PATCHER_VERSION}-${TODAY}.apk"
 
           echo "最終ファイル名: $FINAL_NAME"
 
