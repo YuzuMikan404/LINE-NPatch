@@ -96,10 +96,11 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
           PATCHER_VERSION="${LATEST_TAG#v}"
-          FINAL_NAME="LINE-\( {{ github.event.inputs.version }}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          mv signed_final.apk "$FINAL_NAME" || { echo "mv failed! signed_final.apk exists?" && ls -l signed_final.apk && exit 1; }
+          VERSION="${{ github.event.inputs.version }}"
+          FINAL_NAME="LINE-\( {VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
+          mv signed_final.apk "$FINAL_NAME"
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME" || echo "File not found after mv"
+          ls -lh "$FINAL_NAME" || echo "mv failed – check if signed_final.apk exists"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -110,9 +111,9 @@ jobs:
             - **Patcher:** NPatch ${{ env.LATEST_TAG }}
             - **Mode:** Local Dex Injection
             - **Built:** $(date +%Y-%m-%d)
-            - **Note:** Manual signing (NPatch auto-sign skipped)
+            - **Note:** Manual signing (NPatch auto-sign skipped due to default keystore error)
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
-          overwrite: true
+          overwrite: true  # 同タグで上書き（overwrite_files ではなく overwrite）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
