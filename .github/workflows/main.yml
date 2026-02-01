@@ -65,23 +65,45 @@ jobs:
       - name: Patch with NPatch
         run: |
           mkdir -p output
-          # --- ここがポイント：NPatchにJKSを見せない ---
-          mkdir -p temp_hide_ks
-          mv *.jks temp_hide_ks/ 2>/dev/null || true
+          # 1. NPatchが勝手にJKSを読み込まないよう一時退避
+          mkdir -p backup_ks
+          mv *.jks backup_ks/ 2>/dev/null || true
           
-          # パッチ実行（署名はここではしない）
+          # 2. NPatch実行 (引数の順番を整理)
           java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output
           
-          # 生成されたファイルを取得
-          PATCHED_FILE=$(ls output/target-*-npatched.apk 2>/dev/null | head -n 1)
+          # 3. 生成されたファイルを確認
+          PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
           if [ -z "$PATCHED_FILE" ]; then
-            echo "Error: Patch failed."
+            echo "Error: NPatch failed to create APK."
             exit 1
           fi
+          
+          # 4. APKが壊れていないか（マニフェストがあるか）確認
+          if ! unzip -l "$PATCHED_FILE" | grep -q "AndroidManifest.xml"; then
+            echo "Error: Generated APK is empty or corrupted."
+            exit 1
+          fi
+          
           mv "$PATCHED_FILE" target-patched.apk
+          mv backup_ks/*.jks . 2>/dev/null || true
 
-          # --- JKSを元に戻す ---
-          mv temp_hide_ks/*.jks . 2>/dev/null || true
+      - name: Zipalign and Sign APK
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          
+          # 整列
+          "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
+          
+          # 署名 (変数展開を防ぐためシングルクォートを使用)
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "${{ env.KEYSTORE_FILE }}" \
+            --ks-pass pass:'${{ env.STORE_PASSWORD }}' \
+            --ks-key-alias '${{ env.KEY_ALIAS }}' \
+            --key-pass pass:'${{ env.KEY_PASSWORD }}' \
+            --min-sdk-version 26 \
+            --out signed_final.apk \
+            target-aligned.apk
 
       - name: Zipalign and Sign APK
         run: |
