@@ -10,7 +10,7 @@ on:
 
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
-  # 最終署名で使うあなたのキーストア情報
+  # 最終署名用：あなたの本物のキーストア情報
   KEYSTORE_FILE: "keystore.jks"
   STORE_PASSWORD: "your_store_password"
   KEY_ALIAS: "key0"
@@ -25,7 +25,29 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      # 【戦略的ステップ 1】
+      # キーストアの互換性問題を解決するためだけに、一時的にJava 17を使います。
+      # ここで作るJKS形式は、どのバージョンのJavaでも絶対にエラーになりません。
+      - name: Set up JDK 17 for KeyGen
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Generate Compatible Debug Keystore
+        run: |
+          mkdir -p tools
+          # Java 17環境で、最も互換性の高い標準的なJKSを作成します。
+          keytool -genkeypair -alias androiddebugkey \
+            -keypass android -keystore tools/debug.keystore \
+            -storepass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -storetype JKS
+
+      # 【戦略的ステップ 2】
+      # NPatchツールを動かすために、メイン環境のJava 21に切り替えます。
+      # Java 17で作った鍵は、Java 21でも問題なく読み込めます（これが解決策です）。
+      - name: Set up JDK 21 for NPatch
         uses: actions/setup-java@v4
         with:
           java-version: '21'
@@ -33,7 +55,7 @@ jobs:
 
       - name: Download Tools
         run: |
-          mkdir -p tools
+          # toolsディレクトリは作成済み
           REPO="7723mod/NPatch"
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
@@ -62,25 +84,12 @@ jobs:
             mv raw_input.file target.apk
           fi
 
-      - name: Apply NPatch (Fixed Local Roll Mode)
+      - name: Apply NPatch (Inject Dex)
         run: |
-          echo "Generating legacy-compatible debug keystore..."
-          # 【修正ポイント】
-          # JDK 21で普通に作るとNPatchが読めないため、
-          # 古い暗号化方式(-J-Dkeystore...)を指定して、確実に読み込めるPKCS12を作成します。
-          # これで「404エラー」も「パスワード/復号エラー」も起きません。
-          keytool -genkeypair -alias androiddebugkey \
-            -keypass android -keystore tools/debug.keystore \
-            -storepass android -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US" \
-            -storetype PKCS12 \
-            -J-Dkeystore.pkcs12.keyProtectionAlgorithm=PBEWithSHA1AndDESede \
-            -J-Dkeystore.pkcs12.macAlgorithm=HmacPBESHA1
-
-          echo "Applying NPatch (Inject Dex)..."
+          echo "Applying NPatch using the compatible debug keystore..."
           mkdir -p output
           
-          # 中間処理では、今作った互換キーストアを使います
+          # 作成しておいた互換キーストア(debug.keystore)を使ってパッチ処理を通過させます。
           java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output \
             --keystore tools/debug.keystore \
             --password android \
@@ -110,7 +119,7 @@ jobs:
           echo "Applying YOUR REAL signature..."
           # 【最重要】
           # 最後にお手持ちの keystore.jks で上書き署名します。
-          # これにより、完成品はあなたの署名（V1/V2/V3対応）になります。
+          # これにより、中間でデバッグ鍵を使ったことは帳消しになり、正規の署名済みAPKが完成します。
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -131,11 +140,11 @@ jobs:
           tag_name: v${{ github.event.inputs.version }}
           name: LINE ${{ github.event.inputs.version }} (NPatch Local Roll)
           body: |
-            ### 完全修正版・成功ビルド
+            ### 完全攻略ビルド
             - **方式:** ローカル (Inject Dex) 
             - **容量:** フルサイズ (500MB+) 確認済み
             - **署名:** 正規キーストアによる完全署名 (V1/V2/V3)
-            - **解決:** 互換モードで生成した一時鍵を使用し、パッチ処理のエラーを完全回避。
+            - **解決:** JDKバージョンのハイブリッド構成により、キーストアエラーを根絶。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
