@@ -1,4 +1,4 @@
-name: NPatch LINE (Standalone Full 500MB+)
+Name: NPatch LINE
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
       version:
         description: 'LINEのバージョン (例: 15.12.2)'
         required: true
-        default: '15.12.2'
 
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
@@ -30,107 +29,81 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Download Tools
-        run: |
-          mkdir -p tools
-          LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName')
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*.jar" --output "npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*.apk" --output "manager.apk" --clobber
-          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+      - name: Download Tools (NPatch)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO_NPATCH="7723mod/NPatch"
+          LATEST_TAG=$(gh release list --repo "$REPO_NPATCH" --limit 1 --json tagName --jq '.[0].tagName')
+          
+          # JAR (パッチャー) と APK (マネージャー) をダウンロード
+          # ファイル名が NPatch-v0.7.3-504-release.jar の形式に対応
+          gh release download "$LATEST_TAG" --repo "$REPO_NPATCH" --pattern "NPatch-*-release.jar" --output "npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo "$REPO_NPATCH" --pattern "NPatch-*-release.apk" --output "manager.apk" --clobber
+          
+          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download LINE APK/APKM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
         run: |
           mkdir download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
           mv "$FILE_PATH" raw_input.file
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event.inputs.version }}
 
-      - name: Step 1 Merge and Extract Libs
+      - name: Prepare APK
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
-            echo "Merging Split APKs..."
             unzip -o raw_input.file -d splitted_apk
-            java -jar APKEditor.jar m -i splitted_apk -o merged.apk
+            java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
-            mv raw_input.file merged.apk
+            mv raw_input.file target.apk
           fi
 
-          echo "Extracting and Removing native libs to avoid NPatch fallback..."
-          # パッチを当てる前にlibフォルダを救出
-          mkdir -p saved_libs
-          unzip -q merged.apk "lib/*" -d saved_libs || true
+      - name: Apply NPatch (Local Mode)
+        run: |
+          # NPatchを実行
+          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex -f -o output
           
-          # 元の APK から署名と lib を完全に削除。これでNPatchが「Nested（入れ子）」に逃げるのを防ぐ。
-          zip -d merged.apk "META-INF/*" "lib/*" || true
-          mv merged.apk light_target.apk
+          # 出力ファイル名が -lspatched.apk または -npatched.apk のいずれかになるため、lsで取得
+          PATCHED_LINE=$(ls output/target-*-patched.apk output/target-*-lspatched.apk 2>/dev/null | head -n 1)
+          
+          if [ -z "$PATCHED_LINE" ]; then
+            echo "Error: Patched APK not found."
+            ls -R output/
+            exit 1
+          fi
+          
+          mv "$PATCHED_LINE" target-patched.apk
 
-      - name: Step 2 Apply NPatch to Light APK
-        run: |
-          echo "Applying NPatch (Strict Local Roll)..."
-          mkdir -p output
-          # 軽量版にパッチを当てることで、Nested化（容量減少）を強制阻止します
-          java -Xmx8G -jar npatch.jar light_target.apk --injectdex --manager manager.apk -f -o output --skip-sign
-          PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
-          mv "$PATCHED_FILE" core_patched.apk
-
-      - name: Step 3 Forced Lib Re-Injection (Stored Mode)
-        run: |
-          echo "Injecting native libs as UNCOMPRESSED (Stored) to prevent corruption..."
-          # 【根本解決のポイント】
-          # 退避させておいた lib を「無圧縮（-0）」でAPKに戻します。
-          # これをしないとAndroidがライブラリを読み込めず「破損」エラーになります。
-          cd saved_libs
-          zip -r -0 ../core_patched.apk lib
-          cd ..
-
-      - name: Step 4 Final Alignment and Official Sign
+      - name: Sign APK (Align & Sign)
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch-LocalRoll.apk"
-          
-          echo "Final structural alignment..."
-          # 手動マージしたAPKの構造を Android 規格に整える
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 core_patched.apk aligned_final.apk
-          
-          # サイズ最終確認（500MB超えを保証）
-          SIZE=$(stat -c%s "aligned_final.apk")
-          echo "Final Aligned APK size: $SIZE bytes"
-
-          echo "Applying official V2/V3 signature..."
-          # apksignerであなたの鍵を使って正規署名。これでインストールが可能になります。
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" \
             --key-pass pass:"$KEY_PASSWORD" \
-            --min-sdk-version 26 \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "$FINAL_NAME" \
-            aligned_final.apk
-          
-          echo "FINAL_APK_PATH=$FINAL_NAME" >> $GITHUB_ENV
+            --out signed_final.apk \
+            target-aligned.apk
+
+      - name: Finalize Filename
+        run: |
+          mv signed_final.apk LINE-${{ github.event.inputs.version }}-NPatch.apk
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}-npatch-standalone
-          name: LINE ${{ github.event.inputs.version }} (NPatch Standalone)
+          tag_name: v${{ github.event.inputs.version }}-npatch
+          name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            ### 100点満点の最終解決版
-            - **方式:** 完全統合型 (Local Roll / Manual Re-inject) 
-            - **容量:** フルサイズ (500MB+) 確認済み
-            - **署名:** 本物キーストアによる完全署名
-            - **修正:** 
-              - NPatchの「Nested化バグ」を回避するためにlibを分離してパッチ。
-              - パッチ後にlibを**無圧縮(Stored)**で戻すことで「破損エラー」を完全に克服。
-          files: ${{ env.FINAL_APK_PATH }}
+            - **Tool:** NPatch (Neo LSPatch)
+            - **Mode:** Local
+            - **Method:** Inject Dex
+          files: LINE-${{ github.event.inputs.version }}-NPatch.apk
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
