@@ -38,43 +38,16 @@ jobs:
           gh release download "$LATEST_TAG" --repo JingMatrix/LSPatch --pattern "*.apk" --output "manager.apk" --clobber
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
-      - name: Download and Handle Complex Filename
+      - name: Download LINE APK/APKM
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          VER="${{ github.event.inputs.version_name }}"
-          echo "Target version: $VER"
-          
-          # 1. 相手のリポジトリの全リリースからファイル一覧を取得し、VERを含むものを探す
-          # --pattern に頼らず、一度リスト化してから拾うことで「見つからない」を防ぎます
-          echo "Fetching asset list from $SOURCE_REPO..."
-          
-          # 全てのリリースから .apk を探し、指定されたバージョン文字列を含むものを1つ特定
-          ASSET_NAME=$(gh release view --repo "$SOURCE_REPO" --json assets --jq ".assets[].name" | grep "$VER" | grep ".apk" | head -n 1)
-          
-          if [ -z "$ASSET_NAME" ]; then
-            echo "::error::Could not find any APK containing '$VER' in $SOURCE_REPO."
-            echo "Available assets for the latest release are:"
-            gh release view --repo "$SOURCE_REPO" --json assets --jq ".assets[].name"
-            exit 1
-          fi
-          
-          echo "Found asset: $ASSET_NAME. Downloading..."
-          gh release download --repo "$SOURCE_REPO" --name "$ASSET_NAME" --output target.apk
-
-      - name: Patch with NPatch
-        run: |
-          # 以前のパスワード保護ロジックを継続
-          mkdir -p output
-          java -Xmx4G -jar npatch.jar target.apk \
-            --manager manager.apk \
-            --injectdex \
-            -f \
-            -o output \
-            --keystore "$KEYSTORE_FILE" \
-            --storepass "$STORE_PASSWORD" \
-            --alias "$KEY_ALIAS" \
-            --keypass "$KEY_PASSWORD" || { echo "NPatch failed"; exit 1; }
+          mkdir download_tmp
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
+          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
+          mv "$FILE_PATH" raw_input.file
+          echo "ORIGINAL_FILENAME=$(basename "$FILE_PATH")" >> $GITHUB_ENV
 
       - name: Prepare APK
         run: |
