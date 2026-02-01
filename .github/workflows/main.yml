@@ -64,8 +64,7 @@ jobs:
               
       - name: Patch with NPatch
         run: |
-          # 1. NPatch実行 (署名オプションをNPatchに直接渡す)
-          # --injectdex を維持し、パスワード類をここで指定します
+          # 1. NPatch実行
           java -Xmx4G -jar npatch.jar target.apk \
             --manager manager.apk \
             --injectdex \
@@ -76,12 +75,11 @@ jobs:
             --alias "${{ env.KEY_ALIAS }}" \
             --keypass "${{ env.KEY_PASSWORD }}"
 
-          # 2. 生成されたファイルを確認
-          # NPatchが自分で署名まで終わらせたファイルを探す
+          # 2. 生成ファイルの確認
           PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
           
           if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::NPatchによるビルド/署名に失敗しました。"
+            echo "::error::NPatch failed to generate the APK. Check the password and alias."
             exit 1
           fi
           
