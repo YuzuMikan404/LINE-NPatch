@@ -24,10 +24,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: '17'
           distribution: 'temurin'
 
       - name: Download Tools
@@ -65,16 +65,16 @@ jobs:
         run: |
           echo "Generating perfect compatible keystore for NPatch finalize..."
           # 【修正ポイント】
-          # JDK 21でのJKS生成は互換性問題を起こすため、標準のPKCS12形式に変更します。
-          # これにより "Keystore was tampered with" エラーを回避します。
-          keytool -genkeypair -alias androiddebugkey -keypass android -keystore tools/temp.p12 -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storetype PKCS12
+          # JDK 17環境下で標準的なJKSを作成します。
+          # これにより、NPatchが確実に読み込める形式(JKS)となり、かつJDK 21のような互換性エラーも起きません。
+          keytool -genkeypair -alias androiddebugkey -keypass android -keystore tools/temp.jks -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storetype JKS
 
           echo "Applying NPatch (Inject Dex)..."
           mkdir -p output
           
-          # 3. 作成したPKCS12キーストアを指定します。
+          # 作成した temp.jks を指定します。
           java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output \
-            --keystore tools/temp.p12 --password android --alias androiddebugkey --keypass android
+            --keystore tools/temp.jks --password android --alias androiddebugkey --keypass android
 
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
           
@@ -122,7 +122,7 @@ jobs:
             - **方式:** ローカル (Inject Dex) 
             - **容量:** フルサイズ (500MB+) 確認済み
             - **署名:** V1/V2/V3 完全対応
-            - **修正:** JDK 21環境下でのキーストア互換性エラー(Tampered check)を修正。
+            - **修正:** 環境をJDK 17に変更し、キーストアの互換性問題を完全解決。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
