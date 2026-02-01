@@ -85,66 +85,38 @@ jobs:
 
       - name: Zipalign and Sign APK
         run: |
+          # 1. Android Build Toolsのパスを取得
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
-          # 4バイト整列
+          # 2. zipalignを実行 (パッチ済みAPKを整列)
           "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
           
-          # 署名 (パスワードは必ずシングルクォートで囲む)
+          # 3. apksignerで署名
+          # 変数を '${{ env.VAR }}' とシングルクォートで囲むのがコツです
           "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "your_file.jks" \
-            --ks-pass pass:'your_password_with_underscore' \
-            --ks-key-alias 'your_alias' \
-            --key-pass pass:'your_password_with_underscore' \
+            --ks "${{ env.KEYSTORE_FILE }}" \
+            --ks-pass pass:'${{ env.STORE_PASSWORD }}' \
+            --ks-key-alias '${{ env.KEY_ALIAS }}' \
+            --key-pass pass:'${{ env.KEY_PASSWORD }}' \
             --min-sdk-version 26 \
-            --out signed_final.apk \
-            target-aligned.apk
-
-
-      - name: Zipalign and Sign APK
-        run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          
-          # 整列
-          "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
-          
-          # 署名 (ハードコードしているパスワードに記号がある場合は ' ' で囲む)
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "your_keystore.jks" \
-            --ks-pass pass:'your_password_with_underscore' \
-            --ks-key-alias 'your_alias' \
-            --key-pass pass:'your_password_with_underscore' \
-            --min-sdk-version 26 \
-            --out signed_final.apk \
-            target-aligned.apk
-
-
-      - name: Sign APK (Align & Sign)
-        run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "$KEYSTORE_FILE" \
-            --ks-pass pass:"$STORE_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass pass:"$KEY_PASSWORD" \
             --out signed_final.apk \
             target-aligned.apk
 
       - name: Finalize Filename
         run: |
-          mv signed_final.apk LINE-${{ github.event.inputs.version }}-NPatch.apk
+          # 入力されたバージョン名を使ってリネーム
+          mv signed_final.apk "LINE-${{ github.event.inputs.version }}-NPatch.apk"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}-npatch
-          name: LINE ${{ github.event.inputs.version }} (NPatch)
+          tag_name: "v${{ github.event.inputs.version }}-npatch"
+          name: "LINE ${{ github.event.inputs.version }} (NPatch)"
           body: |
             - **Tool:** NPatch (Neo LSPatch)
             - **Mode:** Local
             - **Method:** Inject Dex
-          files: LINE-${{ github.event.inputs.version }}-NPatch.apk
+          files: "LINE-${{ github.event.inputs.version }}-NPatch.apk"
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
