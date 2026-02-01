@@ -1,4 +1,4 @@
-name: Patch LINE with NPatch - Debug
+name: Patch LINE with NPatch - Keystore Fix
 
 permissions:
   contents: write
@@ -27,17 +27,79 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Verify keystore
+      - name: Diagnose and Fix Keystore
         run: |
-          if [ ! -f "$KEYSTORE_FILE" ]; then 
-            echo "keystore.jks missing!" 
+          echo "==================================================================="
+          echo "Keystore診断"
+          echo "==================================================================="
+          
+          if [ ! -f keystore.jks ]; then
+            echo "❌ keystore.jks が見つかりません"
             exit 1
           fi
-          echo "=== Keystore詳細情報 ==="
-          keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD"
-        env:
-          KEYSTORE_FILE: keystore.jks
-          STORE_PASSWORD: your_store_password
+          
+          echo ""
+          echo "=== ファイル情報 ==="
+          ls -lh keystore.jks
+          file keystore.jks
+          
+          echo ""
+          echo "=== Keystore内容確認 (JKS形式として) ==="
+          keytool -list -v -keystore keystore.jks -storepass your_store_password -storetype JKS 2>&1 || true
+          
+          echo ""
+          echo "=== Keystore内容確認 (PKCS12形式として) ==="
+          keytool -list -v -keystore keystore.jks -storepass your_store_password -storetype PKCS12 2>&1 || true
+          
+          echo ""
+          echo "=== Keystore内容確認 (形式自動判別) ==="
+          if keytool -list -v -keystore keystore.jks -storepass your_store_password 2>&1 | tee keystore_info.txt; then
+            echo "✅ Keystoreアクセス成功"
+            
+            # Keystore形式を判定
+            if grep -q "Keystore type: PKCS12" keystore_info.txt; then
+              echo "Keystore形式: PKCS12"
+              echo "KEYSTORE_TYPE=PKCS12" >> $GITHUB_ENV
+            elif grep -q "Keystore type: JKS" keystore_info.txt; then
+              echo "Keystore形式: JKS"
+              echo "KEYSTORE_TYPE=JKS" >> $GITHUB_ENV
+            else
+              echo "Keystore形式: 不明"
+              echo "KEYSTORE_TYPE=UNKNOWN" >> $GITHUB_ENV
+            fi
+            
+            # エイリアス名を抽出
+            ALIAS=$(grep "Alias name:" keystore_info.txt | head -1 | sed 's/Alias name: //')
+            echo "検出されたエイリアス: $ALIAS"
+            echo "DETECTED_ALIAS=$ALIAS" >> $GITHUB_ENV
+            
+          else
+            echo "❌ Keystoreアクセス失敗"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== PKCS12形式に変換 ==="
+          # NPatchはPKCS12形式を期待している可能性があるので変換
+          keytool -importkeystore \
+            -srckeystore keystore.jks \
+            -srcstoretype JKS \
+            -srcstorepass your_store_password \
+            -destkeystore keystore_pkcs12.p12 \
+            -deststoretype PKCS12 \
+            -deststorepass your_store_password \
+            -destkeypass your_store_password 2>&1 || echo "PKCS12変換スキップ（既にPKCS12形式の可能性）"
+          
+          # 変換成功確認
+          if [ -f keystore_pkcs12.p12 ]; then
+            echo "✅ PKCS12形式のkeystoreを作成しました"
+            ls -lh keystore_pkcs12.p12
+            echo "USE_PKCS12=true" >> $GITHUB_ENV
+          else
+            echo "PKCS12変換不要 - 元のkeystoreを使用"
+            cp keystore.jks keystore_pkcs12.p12
+            echo "USE_PKCS12=false" >> $GITHUB_ENV
+          fi
 
       - name: Download NPatch
         run: |
@@ -47,13 +109,6 @@ jobs:
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
-          
-          echo ""
-          echo "==================================================================="
-          echo "==================== NPatch 完全ヘルプ =========================="
-          echo "==================================================================="
-          java -jar npatch.jar --help 2>&1 || java -jar npatch.jar -h 2>&1 || java -jar npatch.jar 2>&1 || true
-          echo "==================================================================="
         env:
           GH_TOKEN: ${{ github.token }}
     
@@ -76,290 +131,79 @@ jobs:
           SOURCE_REPO: YuzuMikan404/LINE-APK
           VERSION: ${{ github.event.inputs.version }}
           GH_TOKEN: ${{ github.token }}
-
-      - name: Test 1 - keystore + keystore-pass + alias + alias-pass
+          
+      - name: Test with Original Keystore
         continue-on-error: true
         run: |
           echo "==================================================================="
-          echo "Test 1: --keystore --keystore-pass --alias --alias-pass"
+          echo "Test 1: オリジナルのkeystore.jksで試行"
           echo "==================================================================="
-          rm -rf output_test1
+          
+          rm -rf output_original
           java -Xmx4G -jar npatch.jar target.apk \
             --injectdex \
             -f \
             --keystore keystore.jks \
             --keystore-pass your_store_password \
-            --alias key0 \
+            --alias "${DETECTED_ALIAS:-key0}" \
             --alias-pass your_store_password \
-            -o output_test1 2>&1 | tee test1.log
+            -o output_original 2>&1 | tee test_original.log
           
-          if ls output_test1/*.apk 2>/dev/null; then
-            echo "✅ Test 1 成功！"
-            mv output_test1/*.apk result.apk
-            echo "WINNER=test1" >> $GITHUB_ENV
+          if ls output_original/*.apk 2>/dev/null; then
+            RESULT=$(ls output_original/*.apk | head -n 1)
+            # AndroidManifest.xmlの存在確認
+            if unzip -l "$RESULT" | grep -q "AndroidManifest.xml"; then
+              echo "✅ Test 1成功 - AndroidManifest.xml確認"
+              mv "$RESULT" result.apk
+              echo "SUCCESS_METHOD=original_keystore" >> $GITHUB_ENV
+            else
+              echo "⚠️ APKは生成されたがAndroidManifest.xmlがありません"
+            fi
           else
-            echo "❌ Test 1 失敗"
+            echo "❌ Test 1失敗"
           fi
 
-      - name: Test 2 - keystore + ks-pass + alias + key-pass
-        if: env.WINNER == ''
+      - name: Test with PKCS12 Keystore
+        if: env.SUCCESS_METHOD == ''
         continue-on-error: true
         run: |
           echo "==================================================================="
-          echo "Test 2: --keystore --ks-pass --alias --key-pass"
+          echo "Test 2: PKCS12形式のkeystoreで試行"
           echo "==================================================================="
-          rm -rf output_test2
+          
+          rm -rf output_pkcs12
           java -Xmx4G -jar npatch.jar target.apk \
             --injectdex \
             -f \
-            --keystore keystore.jks \
-            --ks-pass your_store_password \
-            --alias key0 \
-            --key-pass your_store_password \
-            -o output_test2 2>&1 | tee test2.log
+            --keystore keystore_pkcs12.p12 \
+            --keystore-pass your_store_password \
+            --alias "${DETECTED_ALIAS:-key0}" \
+            --alias-pass your_store_password \
+            -o output_pkcs12 2>&1 | tee test_pkcs12.log
           
-          if ls output_test2/*.apk 2>/dev/null; then
-            echo "✅ Test 2 成功！"
-            mv output_test2/*.apk result.apk
-            echo "WINNER=test2" >> $GITHUB_ENV
+          if ls output_pkcs12/*.apk 2>/dev/null; then
+            RESULT=$(ls output_pkcs12/*.apk | head -n 1)
+            # AndroidManifest.xmlの存在確認
+            if unzip -l "$RESULT" | grep -q "AndroidManifest.xml"; then
+              echo "✅ Test 2成功 - AndroidManifest.xml確認"
+              mv "$RESULT" result.apk
+              echo "SUCCESS_METHOD=pkcs12_keystore" >> $GITHUB_ENV
+            else
+              echo "⚠️ APKは生成されたがAndroidManifest.xmlがありません"
+            fi
           else
-            echo "❌ Test 2 失敗"
+            echo "❌ Test 2失敗"
           fi
 
-      - name: Test 3 - keystore + ks-pass (pass:) + key-alias + key-pass (pass:)
-        if: env.WINNER == ''
-        continue-on-error: true
+      - name: Fallback - Manual Signing
+        if: env.SUCCESS_METHOD == ''
         run: |
           echo "==================================================================="
-          echo "Test 3: --keystore --ks-pass pass: --key-alias --key-pass pass:"
-          echo "==================================================================="
-          rm -rf output_test3
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --keystore keystore.jks \
-            --ks-pass "pass:your_store_password" \
-            --key-alias key0 \
-            --key-pass "pass:your_store_password" \
-            -o output_test3 2>&1 | tee test3.log
-          
-          if ls output_test3/*.apk 2>/dev/null; then
-            echo "✅ Test 3 成功！"
-            mv output_test3/*.apk result.apk
-            echo "WINNER=test3" >> $GITHUB_ENV
-          else
-            echo "❌ Test 3 失敗"
-          fi
-
-      - name: Test 4 - ks + ks-pass + ks-key-alias + key-pass
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 4: --ks --ks-pass --ks-key-alias --key-pass"
-          echo "==================================================================="
-          rm -rf output_test4
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --ks keystore.jks \
-            --ks-pass your_store_password \
-            --ks-key-alias key0 \
-            --key-pass your_store_password \
-            -o output_test4 2>&1 | tee test4.log
-          
-          if ls output_test4/*.apk 2>/dev/null; then
-            echo "✅ Test 4 成功！"
-            mv output_test4/*.apk result.apk
-            echo "WINNER=test4" >> $GITHUB_ENV
-          else
-            echo "❌ Test 4 失敗"
-          fi
-
-      - name: Test 5 - signApk + signApkPass + signApkAlias + signApkAliasPass
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 5: --signApk --signApkPass --signApkAlias --signApkAliasPass"
-          echo "==================================================================="
-          rm -rf output_test5
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --signApk keystore.jks \
-            --signApkPass your_store_password \
-            --signApkAlias key0 \
-            --signApkAliasPass your_store_password \
-            -o output_test5 2>&1 | tee test5.log
-          
-          if ls output_test5/*.apk 2>/dev/null; then
-            echo "✅ Test 5 成功！"
-            mv output_test5/*.apk result.apk
-            echo "WINNER=test5" >> $GITHUB_ENV
-          else
-            echo "❌ Test 5 失敗"
-          fi
-
-      - name: Test 6 - storeFile + storePassword + keyAlias + keyPassword
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 6: --storeFile --storePassword --keyAlias --keyPassword"
-          echo "==================================================================="
-          rm -rf output_test6
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --storeFile keystore.jks \
-            --storePassword your_store_password \
-            --keyAlias key0 \
-            --keyPassword your_store_password \
-            -o output_test6 2>&1 | tee test6.log
-          
-          if ls output_test6/*.apk 2>/dev/null; then
-            echo "✅ Test 6 成功！"
-            mv output_test6/*.apk result.apk
-            echo "WINNER=test6" >> $GITHUB_ENV
-          else
-            echo "❌ Test 6 失敗"
-          fi
-
-      - name: Test 7 - sign-keystore + sign-keystore-pwd + sign-alias + sign-alias-pwd
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 7: --sign-keystore --sign-keystore-pwd --sign-alias --sign-alias-pwd"
-          echo "==================================================================="
-          rm -rf output_test7
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --sign-keystore keystore.jks \
-            --sign-keystore-pwd your_store_password \
-            --sign-alias key0 \
-            --sign-alias-pwd your_store_password \
-            -o output_test7 2>&1 | tee test7.log
-          
-          if ls output_test7/*.apk 2>/dev/null; then
-            echo "✅ Test 7 成功！"
-            mv output_test7/*.apk result.apk
-            echo "WINNER=test7" >> $GITHUB_ENV
-          else
-            echo "❌ Test 7 失敗"
-          fi
-
-      - name: Test 8 - 環境変数方式 KEYSTORE_PASSWORD
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 8: 環境変数 KEYSTORE_PASSWORD, KEY_PASSWORD"
-          echo "==================================================================="
-          rm -rf output_test8
-          export KEYSTORE_PASSWORD="your_store_password"
-          export KEY_PASSWORD="your_store_password"
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --keystore keystore.jks \
-            --alias key0 \
-            -o output_test8 2>&1 | tee test8.log
-          
-          if ls output_test8/*.apk 2>/dev/null; then
-            echo "✅ Test 8 成功！"
-            mv output_test8/*.apk result.apk
-            echo "WINNER=test8" >> $GITHUB_ENV
-          else
-            echo "❌ Test 8 失敗"
-          fi
-
-      - name: Test 9 - システムプロパティ方式
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 9: Javaシステムプロパティ -Dkeystore.password"
-          echo "==================================================================="
-          rm -rf output_test9
-          java -Xmx4G \
-            -Dkeystore.password=your_store_password \
-            -Dkey.password=your_store_password \
-            -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --keystore keystore.jks \
-            --alias key0 \
-            -o output_test9 2>&1 | tee test9.log
-          
-          if ls output_test9/*.apk 2>/dev/null; then
-            echo "✅ Test 9 成功！"
-            mv output_test9/*.apk result.apk
-            echo "WINNER=test9" >> $GITHUB_ENV
-          else
-            echo "❌ Test 9 失敗"
-          fi
-
-      - name: Test 10 - 絶対パス + シングルダッシュ
-        if: env.WINNER == ''
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 10: 絶対パス + シングルダッシュオプション"
-          echo "==================================================================="
-          rm -rf output_test10
-          KEYSTORE_PATH="$(pwd)/keystore.jks"
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            -keystore "$KEYSTORE_PATH" \
-            -storepass your_store_password \
-            -alias key0 \
-            -keypass your_store_password \
-            -o output_test10 2>&1 | tee test10.log
-          
-          if ls output_test10/*.apk 2>/dev/null; then
-            echo "✅ Test 10 成功！"
-            mv output_test10/*.apk result.apk
-            echo "WINNER=test10" >> $GITHUB_ENV
-          else
-            echo "❌ Test 10 失敗"
-          fi
-
-      - name: Analyze Logs
-        if: env.WINNER == ''
-        run: |
-          echo "==================================================================="
-          echo "==================== 全テスト失敗 - ログ分析 ===================="
-          echo "==================================================================="
-          echo ""
-          echo "--- Test 1 Log ---"
-          cat test1.log 2>/dev/null || echo "No log"
-          echo ""
-          echo "--- Test 2 Log ---"
-          cat test2.log 2>/dev/null || echo "No log"
-          echo ""
-          echo "--- Test 3 Log ---"
-          cat test3.log 2>/dev/null || echo "No log"
-          echo ""
-          echo "--- Test 4 Log ---"
-          cat test4.log 2>/dev/null || echo "No log"
-          echo ""
-          echo "--- Test 5 Log ---"
-          cat test5.log 2>/dev/null || echo "No log"
-          echo ""
-
-      - name: Fallback - 手動署名
-        if: env.WINNER == ''
-        run: |
-          echo "==================================================================="
-          echo "フォールバック: NPatch署名スキップ + 手動署名"
+          echo "フォールバック: 手動署名"
           echo "==================================================================="
           
           rm -rf output_fallback
-          java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output_fallback 2>&1 | tee fallback.log
+          java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output_fallback
           
           PATCHED=$(ls output_fallback/*.apk | head -n 1)
           mv "$PATCHED" target-patched.apk
@@ -369,19 +213,20 @@ jobs:
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks keystore.jks \
             --ks-pass pass:your_store_password \
-            --ks-key-alias key0 \
+            --ks-key-alias "${DETECTED_ALIAS:-key0}" \
             --key-pass pass:your_store_password \
             --min-sdk-version 24 \
             --v2-signing-enabled \
             --out result.apk \
             target-aligned.apk
           
-          echo "WINNER=fallback" >> $GITHUB_ENV
+          echo "SUCCESS_METHOD=manual_signing" >> $GITHUB_ENV
 
       - name: Verify Final APK
         run: |
           echo "==================================================================="
-          echo "勝者: $WINNER"
+          echo "最終APK検証"
+          echo "使用された方法: $SUCCESS_METHOD"
           echo "==================================================================="
           
           if [ ! -f result.apk ]; then
@@ -389,6 +234,15 @@ jobs:
             exit 1
           fi
           
+          # AndroidManifest.xml確認
+          if unzip -l result.apk | grep -q "AndroidManifest.xml"; then
+            echo "✅ AndroidManifest.xml 存在"
+          else
+            echo "❌ AndroidManifest.xml が見つかりません"
+            exit 1
+          fi
+          
+          # 署名確認
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           "$BUILD_TOOLS_DIR/apksigner" verify -v result.apk
           
@@ -413,9 +267,8 @@ jobs:
             - **Patcher:** NPatch v${{ env.PATCHER_VERSION }}
             - **Mode:** Local Dex Injection
             - **Built:** $(date +%Y-%m-%d)
-            - **成功した署名方法:** ${{ env.WINNER }}
-            
-            このビルドで使用された署名方法を確認してください。
+            - **Keystore Type:** ${{ env.KEYSTORE_TYPE }}
+            - **Signing Method:** ${{ env.SUCCESS_METHOD }}
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
           overwrite_files: true
