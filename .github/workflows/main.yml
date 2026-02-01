@@ -1,4 +1,4 @@
-name: NPatch LINE
+name: NPatch LINE (7723mod)
 
 on:
   workflow_dispatch:
@@ -47,25 +47,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p tools
-          # リポジトリを直接指定して環境変数の不具合を回避
+          # リポジトリを固定
           REPO="7723mod/NPatch"
           echo "Fetching latest release from $REPO..."
           
-          # 最新のタグを取得
+          # 最新タグを取得
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
           
           if [ -z "$LATEST_TAG" ]; then
-            echo "Error: Could not fetch latest tag from $REPO. Please check the repository URL."
+            echo "Error: Could not fetch latest tag from $REPO."
             exit 1
           fi
           
           echo "Latest NPatch version: $LATEST_TAG"
           
-          # Jarファイルを取得 (名前をnpatch.jarに固定)
+          # JarとApkをダウンロード
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
-          
-          # Manager APKを取得 (パッチ時に参照するため)
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found in release assets, proceeding without it."
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found, skipping."
 
       - name: Download LINE APK/APKM
         env:
@@ -99,10 +97,8 @@ jobs:
           echo "Running NPatch..."
           mkdir -p output
           
-          # NPatchコマンドの構築
           CMD="java -jar tools/npatch.jar target.apk -f -o output"
           
-          # Manager APKがある場合は注入オプションを追加
           if [ -f "tools/manager.apk" ]; then
             echo "Manager APK found, injecting..."
             CMD="$CMD --manager tools/manager.apk"
@@ -111,7 +107,6 @@ jobs:
           echo "Executing: $CMD"
           $CMD
           
-          # パッチ済みファイルの確認
           PATCHED_APK=$(find output -name "*patched*.apk" | head -n 1)
           
           if [ -f "$PATCHED_APK" ]; then
@@ -119,7 +114,6 @@ jobs:
             echo "Patch success."
           else
             echo "Error: Patch output not found."
-            ls -R output
             exit 1
           fi
 
@@ -140,13 +134,17 @@ jobs:
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
+          echo "Zipaligning..."
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           
+          echo "Signing..."
+          # --min-sdk-version 27 を追加して解析エラーを回避
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" \
             --key-pass pass:"$KEY_PASSWORD" \
+            --min-sdk-version 27 \
             --out signed_final.apk \
             target-aligned.apk
 
