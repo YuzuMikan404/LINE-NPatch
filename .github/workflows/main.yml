@@ -1,4 +1,4 @@
-name: NPatch LINE (Fundamental Solution)
+name: NPatch LINE (Fundamental Solution V3)
 
 on:
   workflow_dispatch:
@@ -36,12 +36,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p tools
-          # 7723mod NPatch取得
           REPO="7723mod/NPatch"
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber
-          # APKEditor取得
           wget -O tools/APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download LINE APK/APKM
@@ -54,73 +52,63 @@ jobs:
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
           mv "$FILE_PATH" raw_input.file
 
-      - name: Prepare APK (Merge Splits)
+      - name: Prepare APK (Merge)
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
-            echo "Merging split APKs..."
             unzip -o raw_input.file -d splitted_apk
             java -jar tools/APKEditor.jar m -i splitted_apk -o target.apk
           else
-            echo "Single APK detected."
             mv raw_input.file target.apk
           fi
 
-      - name: Apply NPatch (Local Mode - Inject Dex)
+      - name: Apply NPatch (Local Mode)
         run: |
-          echo "Applying NPatch in LOCAL mode (the same as your working LSPatch)..."
+          # Java 21環境下でのNPatch署名エラーを回避するため、一時的なJKSを作成して渡す
+          keytool -genkey -v -keystore temp_debug.jks -alias debug -keyalg RSA -keysize 2048 -validity 1 \
+            -storepass password -keypass password -dname "CN=Debug"
+
           mkdir -p output
-          
-          # 【重要】--local (または --injectdex) を使用することで、
-          # ポータブルモードではなく、正常なアプリ構造のままパッチを当てます。
-          # 署名エラーを避けるため、ここでは一旦 NPatch の内部署名はスキップ（または無視）します。
-          java -Xmx4G -jar tools/npatch.jar target.apk --local --manager tools/manager.apk -f -o output
+          # --local (Inject Dex) を使用
+          java -Xmx4G -jar tools/npatch.jar target.apk --local --manager tools/manager.apk -f -o output \
+            --keystore temp_debug.jks --password password --alias debug --keypass password
 
-          # 出力されたAPKを特定
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
-          if [ -z "$PATCHED_FILE" ]; then
-            echo "Error: Patching failed, no output file."
-            exit 1
-          fi
-          mv "$PATCHED_FILE" target-patched.apk
+          if [ -z "$PATCHED_FILE" ]; then exit 1; fi
+          mv "$PATCHED_FILE" target-patched-raw.apk
 
-      - name: Sign APK (Professional Sign)
+      - name: Sign APK (Full Overwrite)
         run: |
-          # Android SDKのビルドツールを取得
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
-          # 1. Zipalign (必須：これがないとインストールに失敗することが多い)
-          echo "Zipaligning..."
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
+          # Zipalign
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched-raw.apk target-aligned.apk
           
-          # 2. Apksigner (正式署名)
-          # V2/V3署名を強制し、Androidシステムが正しく解析できるようにします。
-          echo "Signing with your key..."
           FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
+          echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_ENV
           
+          # 【根本解決】--min-sdk-version 26 を指定することで、manifest解析エラーを強制回避する
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" \
             --key-pass pass:"$KEY_PASSWORD" \
+            --min-sdk-version 26 \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
             --out "$FINAL_NAME" \
             target-aligned.apk
-            
-          echo "FINAL_APK_PATH=$FINAL_NAME" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}
-          name: LINE ${{ github.event.inputs.version }} (NPatch Local)
+          name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            ### 根本解決済み
-            - **方式:** ローカルモード (Inject Dex)
-            - **署名:** V1/V2/V3 対応
-            - 正常にインストールできるはずです。
-          files: ${{ env.FINAL_APK_PATH }}
+            - **Version:** ${{ github.event.inputs.version }}
+            - **Mode:** Local (Inject Dex)
+            - **Fix:** MinSDK forced to 26 / Local mode enabled
+          files: ${{ env.FINAL_NAME }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
