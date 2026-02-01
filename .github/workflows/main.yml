@@ -1,4 +1,4 @@
-name: NPatch LINE
+name: NPatch LINE (7723mod)
 
 on:
   workflow_dispatch:
@@ -47,18 +47,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p tools
-          echo "Fetching latest release from $NPATCH_REPO..."
+          # リポジトリを直接指定して環境変数の不具合を回避
+          REPO="7723mod/NPatch"
+          echo "Fetching latest release from $REPO..."
           
           # 最新のタグを取得
-          LATEST_TAG=$(gh release list --repo "$NPATCH_REPO" --limit 1 --json tagName --jq '.[0].tagName')
+          LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Error: Could not fetch latest tag from $REPO. Please check the repository URL."
+            exit 1
+          fi
+          
           echo "Latest NPatch version: $LATEST_TAG"
           
           # Jarファイルを取得 (名前をnpatch.jarに固定)
-          gh release download "$LATEST_TAG" --repo "$NPATCH_REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
           
           # Manager APKを取得 (パッチ時に参照するため)
-          # 存在しない場合にエラーにならないよう || true を付与し、ある場合のみダウンロード
-          gh release download "$LATEST_TAG" --repo "$NPATCH_REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found in release assets, proceeding without it."
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found in release assets, proceeding without it."
 
       - name: Download LINE APK/APKM
         env:
@@ -92,19 +99,19 @@ jobs:
           echo "Running NPatch..."
           mkdir -p output
           
-          # コマンドライン引数の構築
-          # 7723mod版はLSPatchベースなので、--managerオプションが推奨される場合が多いです
+          # NPatchコマンドの構築
           CMD="java -jar tools/npatch.jar target.apk -f -o output"
           
+          # Manager APKがある場合は注入オプションを追加
           if [ -f "tools/manager.apk" ]; then
             echo "Manager APK found, injecting..."
             CMD="$CMD --manager tools/manager.apk"
           fi
           
-          # 実行
+          echo "Executing: $CMD"
           $CMD
           
-          # 出力確認 (LSPatch系は output/xxxxx-patched.apk のように生成される)
+          # パッチ済みファイルの確認
           PATCHED_APK=$(find output -name "*patched*.apk" | head -n 1)
           
           if [ -f "$PATCHED_APK" ]; then
