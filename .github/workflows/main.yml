@@ -96,13 +96,17 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
           PATCHER_VERSION="${LATEST_TAG#v}"
-          # Correctly capture the input version (this works reliably)
+          # ここで正しく入力バージョンを取得（これが大事！）
           INPUT_VERSION="${{ github.event.inputs.version }}"
           FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          mv signed_final.apk "$FINAL_NAME" || { echo "mv failed – signed_final.apk missing?" && ls -la && exit 1; }
+          # デバッグ用に確認
+          echo "バージョン: ${INPUT_VERSION}"
+          echo "パッチャー: ${PATCHER_VERSION}"
+          echo "最終ファイル名: ${FINAL_NAME}"
+          mv signed_final.apk "$FINAL_NAME" || { echo "mv失敗！ signed_final.apkがないかも" && ls -la && exit 1; }
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME" || echo "File not found after mv"
-
+          ls -lh "$FINAL_NAME" || echo "mv後にファイルが見つからないよ"
+    
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
