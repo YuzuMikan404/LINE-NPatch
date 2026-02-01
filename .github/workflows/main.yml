@@ -1,4 +1,4 @@
-name: LSPatch LINE
+name: NPatch LINE (Neo LSPatch)
 
 on:
   workflow_dispatch:
@@ -33,9 +33,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST_TAG=$(gh release list --repo JingMatrix/LSPatch --limit 1 --json tagName --jq '.[0].tagName')
-          gh release download "$LATEST_TAG" --repo JingMatrix/LSPatch --pattern "*.jar" --output "lspatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo JingMatrix/LSPatch --pattern "*.apk" --output "manager.apk" --clobber
+          # NPatchの最新リリースタグを取得 (例: v0.7.3)
+          LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName')
+          
+          # JARファイルをダウンロード（*-release.jar パターンでマッチ）
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
+          
+          # Manager APKをダウンロード（*-release.apk パターン、存在しなければ無視）
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "Manager APK not found in this release, proceeding without --manager option if possible"
+          
+          # APKEditor（split APKs対応用）
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download LINE APK/APKM
@@ -58,10 +65,21 @@ jobs:
             mv raw_input.file target.apk
           fi
 
-      - name: Apply LSPatch (Local Mode)
+      - name: Apply NPatch (Local Mode / Inject Dex)
         run: |
-          java -Xmx4G -jar lspatch.jar target.apk --manager manager.apk --injectdex -f -o output
-          PATCHED_LINE=$(ls output/target-*-lspatched.apk | head -n 1)
+          # NPatchコマンド（--manager はmanagerが存在する場合のみ使用）
+          if [ -f npatch-manager.apk ]; then
+            java -Xmx4G -jar npatch.jar target.apk --manager npatch-manager.apk --injectdex -f -o output
+          else
+            java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output
+            echo "Warning: No manager APK found, patched without manager integration"
+          fi
+          
+          # 出力APKを柔軟に探す（パターンに依存しないよう）
+          PATCHED_LINE=$(ls output/*.apk 2>/dev/null | grep -E 'patched|npatch' | head -n 1 || ls output/*.apk | head -n 1)
+          if [ -z "$PATCHED_LINE" ]; then
+            echo "Error: No patched APK generated in output/" && exit 1
+          fi
           mv "$PATCHED_LINE" target-patched.apk
 
       - name: Sign APK (Align & Sign)
@@ -78,18 +96,25 @@ jobs:
 
       - name: Finalize Filename
         run: |
-          # アップロード前にランナー上でファイル名を確定させる
-          mv signed_final.apk LINE-${{ github.event.inputs.version }}-LocalRoll.apk
+          # 動的なファイル名（NPatchバージョン + 日付）
+          TODAY=$(date +%Y%m%d)
+          PATCHER_VERSION="${LATEST_TAG#v}"  # v0.7.3 → 0.7.3
+          FINAL_NAME="LINE-\( {{ github.event.inputs.version }}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
+          mv signed_final.apk "$FINAL_NAME"
+          echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: LINE ${{ github.event.inputs.version }} (Local Roll)
+          tag_name: v${{ github.event.inputs.version }}-npatch
+          name: LINE ${{ github.event.inputs.version }} (NPatch Neo - Local Inject)
           body: |
-            - **Mode:** Local
-            - **Method:** Inject Dex
-          files: LINE-${{ github.event.inputs.version }}-LocalRoll.apk
+            - **Patcher:** NPatch (Neo LSPatch fork) ${{ env.LATEST_TAG }}
+            - **Repository:** https://github.com/7723mod/NPatch
+            - **Mode:** Local (Dex Injection)
+            - **Build Date:** $(date +%Y-%m-%d)
+            - **注意:** LSPosedモジュールはNPatch Managerアプリ経由でインストールしてください（別途必要）
+          files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
