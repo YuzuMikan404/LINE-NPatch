@@ -42,7 +42,7 @@ jobs:
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName' || echo "v0.7.3")
           echo "NPatch version: $LATEST_TAG"
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK – proceeding without"
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download & Prepare LINE APK
@@ -53,7 +53,7 @@ jobs:
           mkdir -p download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" \) | head -n 1)
-          [ -z "$FILE_PATH" ] && { echo "No file for $VERSION" && exit 1; }
+          [ -z "$FILE_PATH" ] && exit 1
           mv "$FILE_PATH" raw_input.file
           if unzip -l raw_input.file | grep -q "base.apk"; then
             unzip -o raw_input.file -d splitted_apk
@@ -61,12 +61,11 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
-          ls -lh target.apk
 
       - name: Apply NPatch
         run: |
           echo "Patching..."
-          set +e  # エラー無視して進む（署名失敗OK）
+          set +e
           if [ -f npatch-manager.apk ] && [ -s npatch-manager.apk ]; then
             java -Xmx4G -jar npatch.jar target.apk --manager npatch-manager.apk --injectdex -f -o output
           else
@@ -76,17 +75,13 @@ jobs:
           set -e
           
           PATCHED=$(ls output/*.apk | head -n 1)
-          [ -z "$PATCHED" ] && { echo "No patched APK generated! Output dir:" && ls -la output/ && exit 1; }
+          [ -z "$PATCHED" ] && exit 1
           mv "$PATCHED" target-patched.apk
-          echo "Patched APK:"
-          ls -lh target-patched.apk
 
       - name: Align & Sign
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          echo "Build-tools: $BUILD_TOOLS_DIR"
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
-          
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -102,9 +97,9 @@ jobs:
           TODAY=$(date +%Y%m%d)
           PATCHER_VERSION="${LATEST_TAG#v}"
           FINAL_NAME="LINE-\( {{ github.event.inputs.version }}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          mv signed_final.apk "$FINAL_NAME"
+          mv signed_final.apk "$FINAL_NAME" || { echo "mv failed! signed_final.apk exists?" && ls -l signed_final.apk && exit 1; }
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME"
+          ls -lh "$FINAL_NAME" || echo "File not found after mv"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -115,7 +110,7 @@ jobs:
             - **Patcher:** NPatch ${{ env.LATEST_TAG }}
             - **Mode:** Local Dex Injection
             - **Built:** $(date +%Y-%m-%d)
-            - **Note:** Manual signing (NPatch auto-sign skipped due to default keystore error)
+            - **Note:** Manual signing (NPatch auto-sign skipped)
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
           overwrite: true
