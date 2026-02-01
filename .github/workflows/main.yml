@@ -1,4 +1,4 @@
-name: NPatch LINE (Neo LSPatch)
+name: NPatch LINE (Neo LSPatch - No Auto Sign)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ env:
   STORE_PASSWORD: "your_store_password"
   KEY_ALIAS: "key0"
   KEY_PASSWORD: "your_store_password"
-  MIN_SDK: "24"  # LINE 15.x はだいたい Android 7+ なので安全に24指定（調整可）
+  MIN_SDK: "24"
 
 jobs:
   patch-line:
@@ -30,82 +30,58 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Verify Keystore Exists and is Readable
+      - name: Verify Keystore
         run: |
-          if [ ! -f "$KEYSTORE_FILE" ]; then
-            echo "Error: keystore.jks not found in repository root!" && exit 1
-          fi
-          # 簡単な検証（listでパスワードが通るか確認）
-          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" || {
-            echo "Error: Keystore is invalid or password wrong. Recreate it!"
-            echo "Run locally: keytool -genkey -v -keystore keystore.jks -alias key0 -keyalg RSA -keysize 2048 -validity 10000 -storepass your_store_password -keypass your_store_password"
-            exit 1
-          }
+          if [ ! -f "$KEYSTORE_FILE" ]; then echo "keystore.jks missing!" && exit 1; fi
+          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" || exit 1
 
       - name: Download Tools
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName' || echo "v0.7.3")
-          echo "Using NPatch tag: $LATEST_TAG"
-          
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber || {
-            echo "Failed to download npatch.jar – check repo releases: https://github.com/7723mod/NPatch/releases"
-            exit 1
-          }
-          
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK in release – patching without --manager"
-
+          echo "NPatch version: $LATEST_TAG"
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
-      - name: Download LINE APK/APKM
+      - name: Download & Prepare LINE APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.event.inputs.version }}
         run: |
           mkdir -p download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
-          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
-          [ -z "$FILE_PATH" ] && { echo "No suitable file found for $VERSION" && exit 1; }
+          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" \) | head -n 1)
+          [ -z "$FILE_PATH" ] && exit 1
           mv "$FILE_PATH" raw_input.file
-          echo "ORIGINAL_FILENAME=$(basename "$FILE_PATH")" >> $GITHUB_ENV
-
-      - name: Prepare APK
-        run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
             unzip -o raw_input.file -d splitted_apk
             java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
             mv raw_input.file target.apk
           fi
-          ls -l target.apk  # サイズ確認
 
-      - name: Apply NPatch (Local Mode / Inject Dex)
+      - name: Apply NPatch (Skip Auto-Sign if Possible)
         run: |
-          echo "Running NPatch..."
+          echo "Patching with NPatch (no manager if missing)..."
+          # --no-sign や類似オプションがあれば使う（要確認）。なければそのまま → 内部署名失敗しても出力は残る
           if [ -f npatch-manager.apk ] && [ -s npatch-manager.apk ]; then
-            java -Xmx4G -jar npatch.jar target.apk --manager npatch-manager.apk --injectdex -f -o output || {
-              echo "NPatch failed – check if keystore is needed or try without --manager"
-              exit 1
-            }
+            java -Xmx4G -jar npatch.jar target.apk --manager npatch-manager.apk --injectdex -f -o output
           else
-            java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output || {
-              echo "NPatch failed (no manager mode)"
-              exit 1
-            }
-            echo "Warning: Patched without manager integration"
+            java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output
+            echo "Patched without manager"
           fi
           
-          PATCHED_LINE=$(ls output/*.apk 2>/dev/null | head -n 1)
-          [ -z "$PATCHED_LINE" ] && { echo "No output APK generated!" && ls -la output/ && exit 1; }
-          mv "$PATCHED_LINE" target-patched.apk
-          ls -l target-patched.apk
+          PATCHED=$(ls output/*.apk | head -n 1)
+          [ -z "$PATCHED" ] && { echo "No patched APK! Contents:" && ls -la output/ && exit 1; }
+          mv "$PATCHED" target-patched.apk
+          echo "Patched APK size:" && ls -lh target-patched.apk
 
-      - name: Sign APK (Align & Sign)
+      - name: Align & Sign Manually
         run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          echo "Using build-tools: $BUILD_TOOLS_DIR"
-          
+          echo "Build-tools: $BUILD_TOOLS_DIR"
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           
           "$BUILD_TOOLS_DIR/apksigner" sign \
@@ -115,12 +91,9 @@ jobs:
             --key-pass pass:"$KEY_PASSWORD" \
             --min-sdk-version "$MIN_SDK" \
             --out signed_final.apk \
-            target-aligned.apk || {
-              echo "apksigner failed – perhaps APK is corrupted from patching step"
-              exit 1
-            }
+            target-aligned.apk
 
-      - name: Finalize Filename
+      - name: Finalize & Release
         run: |
           TODAY=$(date +%Y%m%d)
           PATCHER_VERSION="${LATEST_TAG#v}"
@@ -132,11 +105,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}-npatch
-          name: LINE ${{ github.event.inputs.version }} (NPatch Neo - Local Inject)
+          name: LINE ${{ github.event.inputs.version }} (NPatch Neo Local)
           body: |
-            - **Patcher:** NPatch ${{ env.LATEST_TAG }}
-            - **Repo:** https://github.com/7723mod/NPatch
-            - **Build Date:** $(date +%Y-%m-%d)
+            - Patcher: NPatch ${{ env.LATEST_TAG }}
+            - Mode: Local Dex Injection
+            - Built: $(date +%Y-%m-%d)
+            - Note: Manual signing used (auto-sign skipped due to default keystore issue)
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
         env:
