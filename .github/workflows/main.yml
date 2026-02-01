@@ -6,7 +6,7 @@ on:
       version:
         description: 'LINEのバージョン (例: 15.12.2)'
         required: true
-
+        
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
   KEYSTORE_FILE: "keystore.jks"
