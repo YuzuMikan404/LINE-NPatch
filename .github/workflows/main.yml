@@ -64,53 +64,28 @@ jobs:
               
       - name: Patch with NPatch
         run: |
-          # 1. 専用の作業ディレクトリを作成して、必要なものだけ移動
-          mkdir -p workspace
-          mv npatch.jar manager.apk target.apk workspace/
-          
-          # 2. workspaceの中で実行（ここにはJKSがないので、読み込みようがない）
-          cd workspace
-          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex -f --skip-sign -o output
-          
-          # 3. 生成されたファイルを確認
+          # 1. NPatch実行 (署名オプションをNPatchに直接渡す)
+          # --injectdex を維持し、パスワード類をここで指定します
+          java -Xmx4G -jar npatch.jar target.apk \
+            --manager manager.apk \
+            --injectdex \
+            -f \
+            -o output \
+            --keystore "${{ env.KEYSTORE_FILE }}" \
+            --storepass "${{ env.STORE_PASSWORD }}" \
+            --alias "${{ env.KEY_ALIAS }}" \
+            --keypass "${{ env.KEY_PASSWORD }}"
+
+          # 2. 生成されたファイルを確認
+          # NPatchが自分で署名まで終わらせたファイルを探す
           PATCHED_FILE=$(find output -name "target-*-npatched.apk" | head -n 1)
           
           if [ -z "$PATCHED_FILE" ]; then
-            echo "::error::NPatchがAPKの生成に失敗しました。"
+            echo "::error::NPatchによるビルド/署名に失敗しました。"
             exit 1
           fi
           
-          # 4. workspaceの外（元の場所）に成果物を戻す
-          mv "$PATCHED_FILE" ../target-patched.apk
-          cd ..
-          
-          # 5. 最終確認
-          if [ ! -f target-patched.apk ]; then
-            echo "::error::成果物の移動に失敗しました。"
-            exit 1
-          fi
-
-      - name: Zipalign and Sign APK
-        run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          
-          # 1. zipalign
-          "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
-          
-          # 2. apksigner (余計なオプションを削除して署名)
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "${{ env.KEYSTORE_FILE }}" \
-            --ks-pass pass:'${{ env.STORE_PASSWORD }}' \
-            --ks-key-alias '${{ env.KEY_ALIAS }}' \
-            --key-pass pass:'${{ env.KEY_PASSWORD }}' \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out signed_final.apk \
-            target-aligned.apk
-
-          # 3. 検証 (これが成功すればAPKとしては正常)
-          "$BUILD_TOOLS_DIR/apksigner" verify --verbose signed_final.apk
+          mv "$PATCHED_FILE" signed_final.apk
 
       - name: Finalize Filename
         run: |
