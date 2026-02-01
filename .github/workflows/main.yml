@@ -64,22 +64,21 @@ jobs:
       - name: Apply NPatch (Fixed Local Roll Mode)
         run: |
           echo "Generating perfect compatible keystore for NPatch finalize..."
-          # NPatch内部の署名ライブラリがJava 21で死なないよう、極めて標準的なJKSを作成。
-          keytool -genkeypair -alias androiddebugkey -keypass android -keystore tools/temp.jks -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storetype JKS
+          # 【修正ポイント】
+          # JDK 21でのJKS生成は互換性問題を起こすため、標準のPKCS12形式に変更します。
+          # これにより "Keystore was tampered with" エラーを回避します。
+          keytool -genkeypair -alias androiddebugkey -keypass android -keystore tools/temp.p12 -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" -storetype PKCS12
 
           echo "Applying NPatch (Inject Dex)..."
           mkdir -p output
           
-          # 【最重要】
-          # 1. --local は絶対に使いません (これが264MBになる原因でした)。
-          # 2. --injectdex を使用します。これがLSPatchの「Local Roll」と同一です。
-          # 3. 内部署名を完遂させるために作成した temp.jks を指定します。
+          # 3. 作成したPKCS12キーストアを指定します。
           java -Xmx8G -jar tools/npatch.jar target.apk --injectdex --manager tools/manager.apk -f -o output \
-            --keystore tools/temp.jks --password android --alias androiddebugkey --keypass android
+            --keystore tools/temp.p12 --password android --alias androiddebugkey --keypass android
 
           PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
           
-          # 【整合性チェック】500MB前後であることを確認。200MB台ならここでエラーにする。
+          # 【整合性チェック】
           SIZE=$(stat -c%s "$PATCHED_FILE")
           echo "Patched APK size: $SIZE bytes"
           if [ $SIZE -lt 450000000 ]; then
@@ -123,7 +122,7 @@ jobs:
             - **方式:** ローカル (Inject Dex) 
             - **容量:** フルサイズ (500MB+) 確認済み
             - **署名:** V1/V2/V3 完全対応
-            - **修正:** `--local` (Nested) を廃止し、データをAPK内に完全に統合。
+            - **修正:** JDK 21環境下でのキーストア互換性エラー(Tampered check)を修正。
           files: ${{ env.FINAL_APK_PATH }}
           make_latest: true
         env:
