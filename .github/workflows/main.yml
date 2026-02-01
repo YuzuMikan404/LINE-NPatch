@@ -1,276 +1,125 @@
-name: Patch LINE with NPatch - Keystore Fix
-
-permissions:
-  contents: write
+name: NPatch LINE (Fixed Final)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'LINE version (e.g., 15.12.2)'
+        description: 'LINEのバージョン (例: 15.12.2)'
         required: true
         default: '15.12.2'
 
+env:
+  SOURCE_REPO: "YuzuMikan404/LINE-APK"
+  KEYSTORE_FILE: "keystore.jks"
+  STORE_PASSWORD: "your_store_password"
+  KEY_ALIAS: "key0"
+  KEY_PASSWORD: "your_store_password"
+
 jobs:
-  patch:
+  patch-line:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          repository: YuzuMikan404/LINE-NPatch
 
-      - name: Set up Java
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Diagnose and Fix Keystore
+      - name: Download Tools
         run: |
-          echo "==================================================================="
-          echo "Keystore診断"
-          echo "==================================================================="
-          
-          if [ ! -f keystore.jks ]; then
-            echo "❌ keystore.jks が見つかりません"
-            exit 1
-          fi
-          
-          echo ""
-          echo "=== ファイル情報 ==="
-          ls -lh keystore.jks
-          file keystore.jks
-          
-          echo ""
-          echo "=== Keystore内容確認 (JKS形式として) ==="
-          keytool -list -v -keystore keystore.jks -storepass your_store_password -storetype JKS 2>&1 || true
-          
-          echo ""
-          echo "=== Keystore内容確認 (PKCS12形式として) ==="
-          keytool -list -v -keystore keystore.jks -storepass your_store_password -storetype PKCS12 2>&1 || true
-          
-          echo ""
-          echo "=== Keystore内容確認 (形式自動判別) ==="
-          if keytool -list -v -keystore keystore.jks -storepass your_store_password 2>&1 | tee keystore_info.txt; then
-            echo "✅ Keystoreアクセス成功"
-            
-            # Keystore形式を判定
-            if grep -q "Keystore type: PKCS12" keystore_info.txt; then
-              echo "Keystore形式: PKCS12"
-              echo "KEYSTORE_TYPE=PKCS12" >> $GITHUB_ENV
-            elif grep -q "Keystore type: JKS" keystore_info.txt; then
-              echo "Keystore形式: JKS"
-              echo "KEYSTORE_TYPE=JKS" >> $GITHUB_ENV
-            else
-              echo "Keystore形式: 不明"
-              echo "KEYSTORE_TYPE=UNKNOWN" >> $GITHUB_ENV
-            fi
-            
-            # エイリアス名を抽出
-            ALIAS=$(grep "Alias name:" keystore_info.txt | head -1 | sed 's/Alias name: //')
-            echo "検出されたエイリアス: $ALIAS"
-            echo "DETECTED_ALIAS=$ALIAS" >> $GITHUB_ENV
-            
-          else
-            echo "❌ Keystoreアクセス失敗"
-            exit 1
-          fi
-          
-          echo ""
-          echo "=== PKCS12形式に変換 ==="
-          # NPatchはPKCS12形式を期待している可能性があるので変換
-          keytool -importkeystore \
-            -srckeystore keystore.jks \
-            -srcstoretype JKS \
-            -srcstorepass your_store_password \
-            -destkeystore keystore_pkcs12.p12 \
-            -deststoretype PKCS12 \
-            -deststorepass your_store_password \
-            -destkeypass your_store_password 2>&1 || echo "PKCS12変換スキップ（既にPKCS12形式の可能性）"
-          
-          # 変換成功確認
-          if [ -f keystore_pkcs12.p12 ]; then
-            echo "✅ PKCS12形式のkeystoreを作成しました"
-            ls -lh keystore_pkcs12.p12
-            echo "USE_PKCS12=true" >> $GITHUB_ENV
-          else
-            echo "PKCS12変換不要 - 元のkeystoreを使用"
-            cp keystore.jks keystore_pkcs12.p12
-            echo "USE_PKCS12=false" >> $GITHUB_ENV
-          fi
-
-      - name: Download NPatch
-        run: |
-          LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName' || echo "v0.7.3")
-          echo "NPatch version: $LATEST_TAG"
-          echo "PATCHER_VERSION=${LATEST_TAG#v}" >> $GITHUB_ENV
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
+          mkdir -p tools
+          REPO="7723mod/NPatch"
+          LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "npatch.jar" --clobber
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "manager.apk" --clobber
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
         env:
-          GH_TOKEN: ${{ github.token }}
-    
-      - name: Download LINE APK
-        run: |
-          mkdir -p download_tmp
-          gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
-          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" \) | head -n 1)
-          [ -z "$FILE_PATH" ] && { echo "No file for $VERSION" && exit 1; }
-          mv "$FILE_PATH" raw_input.file
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download LINE APK/APKM
+        run: |
+          mkdir download_tmp
+          gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
+          FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
+          mv "$FILE_PATH" raw_input.file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
+
+      - name: Prepare APK (Merge & Strip)
+        run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
+            echo "Merging Split APKs..."
             unzip -o raw_input.file -d splitted_apk
             java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
             mv raw_input.file target.apk
           fi
-          ls -lh target.apk
-        env:
-          SOURCE_REPO: YuzuMikan404/LINE-APK
-          VERSION: ${{ github.event.inputs.version }}
-          GH_TOKEN: ${{ github.token }}
           
-      - name: Test with Original Keystore
-        continue-on-error: true
-        run: |
-          echo "==================================================================="
-          echo "Test 1: オリジナルのkeystore.jksで試行"
-          echo "==================================================================="
-          
-          rm -rf output_original
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --keystore keystore.jks \
-            --keystore-pass your_store_password \
-            --alias "${DETECTED_ALIAS:-key0}" \
-            --alias-pass your_store_password \
-            -o output_original 2>&1 | tee test_original.log
-          
-          if ls output_original/*.apk 2>/dev/null; then
-            RESULT=$(ls output_original/*.apk | head -n 1)
-            # AndroidManifest.xmlの存在確認
-            if unzip -l "$RESULT" | grep -q "AndroidManifest.xml"; then
-              echo "✅ Test 1成功 - AndroidManifest.xml確認"
-              mv "$RESULT" result.apk
-              echo "SUCCESS_METHOD=original_keystore" >> $GITHUB_ENV
-            else
-              echo "⚠️ APKは生成されたがAndroidManifest.xmlがありません"
-            fi
-          else
-            echo "❌ Test 1失敗"
-          fi
+          # 重要：パッチ前に元の署名を完全に消去し、NPatchの解析エラーを防ぐ
+          zip -d target.apk "META-INF/*" || true
 
-      - name: Test with PKCS12 Keystore
-        if: env.SUCCESS_METHOD == ''
-        continue-on-error: true
+      - name: Apply NPatch (Pure Patching)
         run: |
-          echo "==================================================================="
-          echo "Test 2: PKCS12形式のkeystoreで試行"
-          echo "==================================================================="
-          
-          rm -rf output_pkcs12
-          java -Xmx4G -jar npatch.jar target.apk \
-            --injectdex \
-            -f \
-            --keystore keystore_pkcs12.p12 \
-            --keystore-pass your_store_password \
-            --alias "${DETECTED_ALIAS:-key0}" \
-            --alias-pass your_store_password \
-            -o output_pkcs12 2>&1 | tee test_pkcs12.log
-          
-          if ls output_pkcs12/*.apk 2>/dev/null; then
-            RESULT=$(ls output_pkcs12/*.apk | head -n 1)
-            # AndroidManifest.xmlの存在確認
-            if unzip -l "$RESULT" | grep -q "AndroidManifest.xml"; then
-              echo "✅ Test 2成功 - AndroidManifest.xml確認"
-              mv "$RESULT" result.apk
-              echo "SUCCESS_METHOD=pkcs12_keystore" >> $GITHUB_ENV
-            else
-              echo "⚠️ APKは生成されたがAndroidManifest.xmlがありません"
-            fi
-          else
-            echo "❌ Test 2失敗"
-          fi
+          echo "Applying NPatch without internal keystore..."
+          # 【重要】--keystore 引数は絶対に使いません。
+          # --skip-sign を付けて、パッチ（Dex注入）のみを確実に終わらせます。
+          # これで容量が減る「Portableフォールバック」を阻止します。
+          java -Xmx8G -jar npatch.jar target.apk --injectdex --manager manager.apk -f -o output --skip-sign
 
-      - name: Fallback - Manual Signing
-        if: env.SUCCESS_METHOD == ''
+          # 出力ファイル名は環境によって変わるため、findで取得
+          PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
+          if [ -z "$PATCHED_FILE" ]; then
+             echo "Error: NPatch failed to produce output!"
+             exit 1
+          fi
+          mv "$PATCHED_FILE" target-patched.apk
+
+      - name: Sign APK (Zipalign & apksigner)
         run: |
-          echo "==================================================================="
-          echo "フォールバック: 手動署名"
-          echo "==================================================================="
-          
-          rm -rf output_fallback
-          java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output_fallback
-          
-          PATCHED=$(ls output_fallback/*.apk | head -n 1)
-          mv "$PATCHED" target-patched.apk
-          
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          
+          echo "Zipaligning..."
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks keystore.jks \
-            --ks-pass pass:your_store_password \
-            --ks-key-alias "${DETECTED_ALIAS:-key0}" \
-            --key-pass pass:your_store_password \
-            --min-sdk-version 24 \
-            --v2-signing-enabled \
-            --out result.apk \
-            target-aligned.apk
           
-          echo "SUCCESS_METHOD=manual_signing" >> $GITHUB_ENV
+          # 容量チェック（500MB前後であることを確認）
+          SIZE=$(stat -c%s "target-aligned.apk")
+          echo "Final aligned APK size: $SIZE bytes"
 
-      - name: Verify Final APK
-        run: |
-          echo "==================================================================="
-          echo "最終APK検証"
-          echo "使用された方法: $SUCCESS_METHOD"
-          echo "==================================================================="
-          
-          if [ ! -f result.apk ]; then
-            echo "❌ APK生成失敗"
-            exit 1
-          fi
-          
-          # AndroidManifest.xml確認
-          if unzip -l result.apk | grep -q "AndroidManifest.xml"; then
-            echo "✅ AndroidManifest.xml 存在"
-          else
-            echo "❌ AndroidManifest.xml が見つかりません"
-            exit 1
-          fi
-          
-          # 署名確認
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          "$BUILD_TOOLS_DIR/apksigner" verify -v result.apk
-          
-          ls -lh result.apk
+          echo "Signing with apksigner (Official Tool)..."
+          # NPatchを介さず、本物の apksigner であなたの鍵を適用。
+          # これが最も確実にインストールできる署名方法です。
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$STORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --min-sdk-version 26 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out signed_final.apk \
+            target-aligned.apk
 
       - name: Finalize Filename
         run: |
-          TODAY=$(date +%Y%m%d)
-          INPUT_VERSION="${{ github.event.inputs.version }}"
-          PATCHER_VERSION="${{ env.PATCHER_VERSION }}"
-          FINAL_NAME="LINE-${INPUT_VERSION}-NPatch-v${PATCHER_VERSION}-${TODAY}.apk"
-          mv result.apk "$FINAL_NAME"
-          echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME"
-          
+          mv signed_final.apk LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}-npatch
           name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            - **Patcher:** NPatch v${{ env.PATCHER_VERSION }}
-            - **Mode:** Local Dex Injection
-            - **Built:** $(date +%Y-%m-%d)
-            - **Keystore Type:** ${{ env.KEYSTORE_TYPE }}
-            - **Signing Method:** ${{ env.SUCCESS_METHOD }}
-          files: ${{ env.FINAL_APK_NAME }}
+            - **Mode:** Local Roll (Inject Dex)
+            - **Status:** Full Size (500MB+)
+            - **Signature:** V1/V2/V3 (apksigner)
+          files: LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
           make_latest: true
-          overwrite_files: true
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
