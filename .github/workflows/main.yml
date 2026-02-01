@@ -61,33 +61,49 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
-          
+                
       - name: Patch with NPatch
         run: |
-          # 出力ディレクトリの作成
-          mkdir -p output
+          # 出力ディレクトリをクリア
+          rm -rf output && mkdir -p output
           
-          # NPatchを実行 (エラー時に無理やり進まないよう || true を削除)
-          # キー周りでエラーが出る場合、--skip-sign を付けても内部的に読み込もうとするため、
-          # 本来はSecretsが正しいことが前提です。
+          # NPatchを実行 (|| true は削除して、エラー時に即停止させる)
           java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output
           
-          # 生成されたファイルを確認
-          PATCHED_LINE=$(ls output/target-*-npatched.apk output/target-*-lspatched.apk output/target-*-patched.apk 2>/dev/null | head -n 1)
+          # 生成されたファイル名を取得
+          PATCHED_FILE=$(ls output/target-*-npatched.apk 2>/dev/null | head -n 1)
           
-          if [ -z "$PATCHED_LINE" ]; then
-            echo "::error::パッチ済みのAPKが見つかりません。NPatchのログを確認してください。"
+          # ファイルが存在するかチェック
+          if [ -z "$PATCHED_FILE" ]; then
+            echo "::error::パッチ済みAPKが生成されませんでした。NPatchの実行ログ（上記）を確認してください。"
             exit 1
           fi
           
-          # APKが壊れていないか（ZIPとして展開可能か）チェック
-          if ! unzip -t "$PATCHED_LINE" > /dev/null; then
-            echo "::error::生成されたAPKが破損しています。"
+          # APKの中身（Manifest）が正しく存在するかチェック
+          if ! unzip -l "$PATCHED_FILE" | grep -q "AndroidManifest.xml"; then
+            echo "::error::生成されたAPKにManifestが含まれていません。パッチ処理に失敗しています。"
             exit 1
           fi
           
-          echo "Found patched APK: $PATCHED_LINE"
-          mv "$PATCHED_LINE" target-patched.apk
+          mv "$PATCHED_FILE" target-patched.apk
+
+      - name: Zipalign and Sign APK
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          
+          # 整列
+          "$BUILD_TOOLS_DIR/zipalign" -v -f -p 4 target-patched.apk target-aligned.apk
+          
+          # 署名 (エラー回避のため --min-sdk-version を明示的に指定)
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$STORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --min-sdk-version 26 \
+            --out signed_final.apk \
+            target-aligned.apk
+
 
       - name: Zipalign and Sign APK
         run: |
