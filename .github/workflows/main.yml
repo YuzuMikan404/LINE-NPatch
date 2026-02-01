@@ -1,5 +1,8 @@
 name: Patch LINE with NPatch
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,6 +44,7 @@ jobs:
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
         env:
           GH_TOKEN: ${{ github.token }}   # ← これを追加！（これで gh が認証される）
+    
       - name: Download LINE APK
         run: |
           mkdir -p download_tmp
@@ -59,7 +63,8 @@ jobs:
         env:
           SOURCE_REPO: YuzuMikan404/LINE-APK
           VERSION: ${{ github.event.inputs.version }}
-
+          GH_TOKEN: ${{ github.token }}   # ← これを追加！これで gh が動く
+          
       - name: Patch with NPatch
         run: |
           echo "Patching..."
