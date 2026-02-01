@@ -61,30 +61,49 @@ jobs:
           else
             mv raw_input.file target.apk
           fi
-      - name: Apply NPatch (Local Mode)
+          
+      - name: Patch with NPatch
         run: |
           # 出力ディレクトリの作成
           mkdir -p output
           
-          # NPatchを実行 (--skip-sign を追加して内部署名エラーを回避)
-          # 注意: --skip-sign が利用できない古いバージョンの場合は、エラーを無視して続行します
-          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output || true
+          # NPatchを実行 (エラー時に無理やり進まないよう || true を削除)
+          # キー周りでエラーが出る場合、--skip-sign を付けても内部的に読み込もうとするため、
+          # 本来はSecretsが正しいことが前提です。
+          java -Xmx4G -jar npatch.jar target.apk --manager manager.apk --injectdex --skip-sign -f -o output
           
-          # 複数の命名パターンに対応してファイルを取得
-          # 1. target-xxx-npatched.apk (最新版)
-          # 2. target-xxx-lspatched.apk (旧版)
-          # 3. target-xxx-patched.apk (汎用)
+          # 生成されたファイルを確認
           PATCHED_LINE=$(ls output/target-*-npatched.apk output/target-*-lspatched.apk output/target-*-patched.apk 2>/dev/null | head -n 1)
           
           if [ -z "$PATCHED_LINE" ]; then
-            echo "Error: Patched APK not found."
-            ls -R output/
+            echo "::error::パッチ済みのAPKが見つかりません。NPatchのログを確認してください。"
+            exit 1
+          fi
+          
+          # APKが壊れていないか（ZIPとして展開可能か）チェック
+          if ! unzip -t "$PATCHED_LINE" > /dev/null; then
+            echo "::error::生成されたAPKが破損しています。"
             exit 1
           fi
           
           echo "Found patched APK: $PATCHED_LINE"
           mv "$PATCHED_LINE" target-patched.apk
 
+      - name: Zipalign and Sign APK
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          
+          # 整列
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
+          
+          # 署名 (パスワードやエイリアスがSecretsと一致している必要があります)
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$STORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --out signed_final.apk \
+            target-aligned.apk
 
       - name: Sign APK (Align & Sign)
         run: |
