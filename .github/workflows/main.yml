@@ -109,26 +109,32 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
 
-          # ハードコード部分をそのまま残す（これが君の希望）
+          # ハードコードはそのまま残す（君の希望通り）
           INPUT_VERSION="15.12.2"
           PATCHER_VERSION="0.7.3"
 
+          # ここが大事！ダブルクォート内で ${変数} を正しく展開
           FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
 
-          echo "入力バージョン: ${INPUT_VERSION}"
-          echo "パッチャーバージョン: ${PATCHER_VERSION}"
-          echo "最終ファイル名: ${FINAL_NAME}"
+          # デバッグ（これでログに正しい名前が出るはず）
+          echo "入力バージョン: $INPUT_VERSION"
+          echo "パッチャーバージョン: $PATCHER_VERSION"
+          echo "今日の日付: $TODAY"
+          echo "最終ファイル名: $FINAL_NAME"
 
+          # リネーム
           mv signed_final.apk "$FINAL_NAME" || {
             echo "mv失敗！ signed_final.apkがないかも"
             ls -la
             exit 1
           }
 
+          # 環境変数にセット
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
 
-          ls -lh "$FINAL_NAME" || echo "ファイルが見つからないよ"
-
+          # 確認
+          ls -lh "$FINAL_NAME" || echo "リネーム後にファイルが見つからないよ"
+      
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
