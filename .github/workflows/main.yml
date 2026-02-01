@@ -1,4 +1,4 @@
-name: Patch LINE with NPatch
+name: Patch LINE with NPatch - Debug
 
 permissions:
   contents: write
@@ -33,7 +33,8 @@ jobs:
             echo "keystore.jks missing!" 
             exit 1
           fi
-          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" || exit 1
+          echo "=== Keystore詳細情報 ==="
+          keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD"
         env:
           KEYSTORE_FILE: keystore.jks
           STORE_PASSWORD: your_store_password
@@ -46,6 +47,13 @@ jobs:
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.jar" --output "npatch.jar" --clobber
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "*-release.apk" --output "npatch-manager.apk" --clobber || echo "No manager APK"
           wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+          
+          echo ""
+          echo "==================================================================="
+          echo "==================== NPatch 完全ヘルプ =========================="
+          echo "==================================================================="
+          java -jar npatch.jar --help 2>&1 || java -jar npatch.jar -h 2>&1 || java -jar npatch.jar 2>&1 || true
+          echo "==================================================================="
         env:
           GH_TOKEN: ${{ github.token }}
     
@@ -68,75 +76,332 @@ jobs:
           SOURCE_REPO: YuzuMikan404/LINE-APK
           VERSION: ${{ github.event.inputs.version }}
           GH_TOKEN: ${{ github.token }}
-          
-      - name: Patch with NPatch
+
+      - name: Test 1 - keystore + keystore-pass + alias + alias-pass
+        continue-on-error: true
         run: |
-          echo "Patching with NPatch..."
+          echo "==================================================================="
+          echo "Test 1: --keystore --keystore-pass --alias --alias-pass"
+          echo "==================================================================="
+          rm -rf output_test1
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --keystore keystore.jks \
+            --keystore-pass your_store_password \
+            --alias key0 \
+            --alias-pass your_store_password \
+            -o output_test1 2>&1 | tee test1.log
           
-          # NPatchでパッチ適用（keystore.jksを使用）
-          if [ -f npatch-manager.apk ] && [ -s npatch-manager.apk ]; then
-            java -Xmx4G -jar npatch.jar target.apk \
-              --manager npatch-manager.apk \
-              --injectdex \
-              -f \
-              --keystore "$KEYSTORE_FILE" \
-              --keystore-pass "$STORE_PASSWORD" \
-              --alias "$KEY_ALIAS" \
-              --alias-pass "$KEY_PASSWORD" \
-              -o output
+          if ls output_test1/*.apk 2>/dev/null; then
+            echo "✅ Test 1 成功！"
+            mv output_test1/*.apk result.apk
+            echo "WINNER=test1" >> $GITHUB_ENV
           else
-            java -Xmx4G -jar npatch.jar target.apk \
-              --injectdex \
-              -f \
-              --keystore "$KEYSTORE_FILE" \
-              --keystore-pass "$STORE_PASSWORD" \
-              --alias "$KEY_ALIAS" \
-              --alias-pass "$KEY_PASSWORD" \
-              -o output
+            echo "❌ Test 1 失敗"
           fi
 
-          # パッチ適用済みAPKを探す
-          PATCHED=$(find output -name "*.apk" -type f 2>/dev/null | head -n 1)
-          if [ -z "$PATCHED" ]; then
-            echo "エラー: パッチ適用されたAPKが見つかりません"
-            echo "outputディレクトリの内容:"
-            ls -la output/ || echo "outputディレクトリが存在しません"
+      - name: Test 2 - keystore + ks-pass + alias + key-pass
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 2: --keystore --ks-pass --alias --key-pass"
+          echo "==================================================================="
+          rm -rf output_test2
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --keystore keystore.jks \
+            --ks-pass your_store_password \
+            --alias key0 \
+            --key-pass your_store_password \
+            -o output_test2 2>&1 | tee test2.log
+          
+          if ls output_test2/*.apk 2>/dev/null; then
+            echo "✅ Test 2 成功！"
+            mv output_test2/*.apk result.apk
+            echo "WINNER=test2" >> $GITHUB_ENV
+          else
+            echo "❌ Test 2 失敗"
+          fi
+
+      - name: Test 3 - keystore + ks-pass (pass:) + key-alias + key-pass (pass:)
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 3: --keystore --ks-pass pass: --key-alias --key-pass pass:"
+          echo "==================================================================="
+          rm -rf output_test3
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --keystore keystore.jks \
+            --ks-pass "pass:your_store_password" \
+            --key-alias key0 \
+            --key-pass "pass:your_store_password" \
+            -o output_test3 2>&1 | tee test3.log
+          
+          if ls output_test3/*.apk 2>/dev/null; then
+            echo "✅ Test 3 成功！"
+            mv output_test3/*.apk result.apk
+            echo "WINNER=test3" >> $GITHUB_ENV
+          else
+            echo "❌ Test 3 失敗"
+          fi
+
+      - name: Test 4 - ks + ks-pass + ks-key-alias + key-pass
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 4: --ks --ks-pass --ks-key-alias --key-pass"
+          echo "==================================================================="
+          rm -rf output_test4
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --ks keystore.jks \
+            --ks-pass your_store_password \
+            --ks-key-alias key0 \
+            --key-pass your_store_password \
+            -o output_test4 2>&1 | tee test4.log
+          
+          if ls output_test4/*.apk 2>/dev/null; then
+            echo "✅ Test 4 成功！"
+            mv output_test4/*.apk result.apk
+            echo "WINNER=test4" >> $GITHUB_ENV
+          else
+            echo "❌ Test 4 失敗"
+          fi
+
+      - name: Test 5 - signApk + signApkPass + signApkAlias + signApkAliasPass
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 5: --signApk --signApkPass --signApkAlias --signApkAliasPass"
+          echo "==================================================================="
+          rm -rf output_test5
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --signApk keystore.jks \
+            --signApkPass your_store_password \
+            --signApkAlias key0 \
+            --signApkAliasPass your_store_password \
+            -o output_test5 2>&1 | tee test5.log
+          
+          if ls output_test5/*.apk 2>/dev/null; then
+            echo "✅ Test 5 成功！"
+            mv output_test5/*.apk result.apk
+            echo "WINNER=test5" >> $GITHUB_ENV
+          else
+            echo "❌ Test 5 失敗"
+          fi
+
+      - name: Test 6 - storeFile + storePassword + keyAlias + keyPassword
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 6: --storeFile --storePassword --keyAlias --keyPassword"
+          echo "==================================================================="
+          rm -rf output_test6
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --storeFile keystore.jks \
+            --storePassword your_store_password \
+            --keyAlias key0 \
+            --keyPassword your_store_password \
+            -o output_test6 2>&1 | tee test6.log
+          
+          if ls output_test6/*.apk 2>/dev/null; then
+            echo "✅ Test 6 成功！"
+            mv output_test6/*.apk result.apk
+            echo "WINNER=test6" >> $GITHUB_ENV
+          else
+            echo "❌ Test 6 失敗"
+          fi
+
+      - name: Test 7 - sign-keystore + sign-keystore-pwd + sign-alias + sign-alias-pwd
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 7: --sign-keystore --sign-keystore-pwd --sign-alias --sign-alias-pwd"
+          echo "==================================================================="
+          rm -rf output_test7
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --sign-keystore keystore.jks \
+            --sign-keystore-pwd your_store_password \
+            --sign-alias key0 \
+            --sign-alias-pwd your_store_password \
+            -o output_test7 2>&1 | tee test7.log
+          
+          if ls output_test7/*.apk 2>/dev/null; then
+            echo "✅ Test 7 成功！"
+            mv output_test7/*.apk result.apk
+            echo "WINNER=test7" >> $GITHUB_ENV
+          else
+            echo "❌ Test 7 失敗"
+          fi
+
+      - name: Test 8 - 環境変数方式 KEYSTORE_PASSWORD
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 8: 環境変数 KEYSTORE_PASSWORD, KEY_PASSWORD"
+          echo "==================================================================="
+          rm -rf output_test8
+          export KEYSTORE_PASSWORD="your_store_password"
+          export KEY_PASSWORD="your_store_password"
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --keystore keystore.jks \
+            --alias key0 \
+            -o output_test8 2>&1 | tee test8.log
+          
+          if ls output_test8/*.apk 2>/dev/null; then
+            echo "✅ Test 8 成功！"
+            mv output_test8/*.apk result.apk
+            echo "WINNER=test8" >> $GITHUB_ENV
+          else
+            echo "❌ Test 8 失敗"
+          fi
+
+      - name: Test 9 - システムプロパティ方式
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 9: Javaシステムプロパティ -Dkeystore.password"
+          echo "==================================================================="
+          rm -rf output_test9
+          java -Xmx4G \
+            -Dkeystore.password=your_store_password \
+            -Dkey.password=your_store_password \
+            -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            --keystore keystore.jks \
+            --alias key0 \
+            -o output_test9 2>&1 | tee test9.log
+          
+          if ls output_test9/*.apk 2>/dev/null; then
+            echo "✅ Test 9 成功！"
+            mv output_test9/*.apk result.apk
+            echo "WINNER=test9" >> $GITHUB_ENV
+          else
+            echo "❌ Test 9 失敗"
+          fi
+
+      - name: Test 10 - 絶対パス + シングルダッシュ
+        if: env.WINNER == ''
+        continue-on-error: true
+        run: |
+          echo "==================================================================="
+          echo "Test 10: 絶対パス + シングルダッシュオプション"
+          echo "==================================================================="
+          rm -rf output_test10
+          KEYSTORE_PATH="$(pwd)/keystore.jks"
+          java -Xmx4G -jar npatch.jar target.apk \
+            --injectdex \
+            -f \
+            -keystore "$KEYSTORE_PATH" \
+            -storepass your_store_password \
+            -alias key0 \
+            -keypass your_store_password \
+            -o output_test10 2>&1 | tee test10.log
+          
+          if ls output_test10/*.apk 2>/dev/null; then
+            echo "✅ Test 10 成功！"
+            mv output_test10/*.apk result.apk
+            echo "WINNER=test10" >> $GITHUB_ENV
+          else
+            echo "❌ Test 10 失敗"
+          fi
+
+      - name: Analyze Logs
+        if: env.WINNER == ''
+        run: |
+          echo "==================================================================="
+          echo "==================== 全テスト失敗 - ログ分析 ===================="
+          echo "==================================================================="
+          echo ""
+          echo "--- Test 1 Log ---"
+          cat test1.log 2>/dev/null || echo "No log"
+          echo ""
+          echo "--- Test 2 Log ---"
+          cat test2.log 2>/dev/null || echo "No log"
+          echo ""
+          echo "--- Test 3 Log ---"
+          cat test3.log 2>/dev/null || echo "No log"
+          echo ""
+          echo "--- Test 4 Log ---"
+          cat test4.log 2>/dev/null || echo "No log"
+          echo ""
+          echo "--- Test 5 Log ---"
+          cat test5.log 2>/dev/null || echo "No log"
+          echo ""
+
+      - name: Fallback - 手動署名
+        if: env.WINNER == ''
+        run: |
+          echo "==================================================================="
+          echo "フォールバック: NPatch署名スキップ + 手動署名"
+          echo "==================================================================="
+          
+          rm -rf output_fallback
+          java -Xmx4G -jar npatch.jar target.apk --injectdex -f -o output_fallback 2>&1 | tee fallback.log
+          
+          PATCHED=$(ls output_fallback/*.apk | head -n 1)
+          mv "$PATCHED" target-patched.apk
+          
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks keystore.jks \
+            --ks-pass pass:your_store_password \
+            --ks-key-alias key0 \
+            --key-pass pass:your_store_password \
+            --min-sdk-version 24 \
+            --v2-signing-enabled \
+            --out result.apk \
+            target-aligned.apk
+          
+          echo "WINNER=fallback" >> $GITHUB_ENV
+
+      - name: Verify Final APK
+        run: |
+          echo "==================================================================="
+          echo "勝者: $WINNER"
+          echo "==================================================================="
+          
+          if [ ! -f result.apk ]; then
+            echo "❌ APK生成失敗"
             exit 1
           fi
           
-          mv "$PATCHED" patched_signed.apk
-          echo "パッチ適用・署名済みAPK:"
-          ls -lh patched_signed.apk
-        env:
-          KEYSTORE_FILE: keystore.jks
-          STORE_PASSWORD: your_store_password
-          KEY_ALIAS: key0
-          KEY_PASSWORD: your_store_password
-
-      - name: Verify APK Signature
-        run: |
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          echo "Build-tools: $BUILD_TOOLS_DIR"
+          "$BUILD_TOOLS_DIR/apksigner" verify -v result.apk
           
-          # 署名検証
-          "$BUILD_TOOLS_DIR/apksigner" verify -v patched_signed.apk
-          
-          echo "署名検証成功！"
+          ls -lh result.apk
 
       - name: Finalize Filename
         run: |
           TODAY=$(date +%Y%m%d)
           INPUT_VERSION="${{ github.event.inputs.version }}"
           PATCHER_VERSION="${{ env.PATCHER_VERSION }}"
-          
           FINAL_NAME="LINE-${INPUT_VERSION}-NPatch-v${PATCHER_VERSION}-${TODAY}.apk"
-          
-          echo "最終ファイル名: $FINAL_NAME"
-          
-          mv patched_signed.apk "$FINAL_NAME"
-          
+          mv result.apk "$FINAL_NAME"
           echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          
           ls -lh "$FINAL_NAME"
           
       - name: Create Release
@@ -145,18 +410,14 @@ jobs:
           tag_name: v${{ github.event.inputs.version }}-npatch
           name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            ## LINE ${{ github.event.inputs.version }} - NPatch Edition
+            - **Patcher:** NPatch v${{ env.PATCHER_VERSION }}
+            - **Mode:** Local Dex Injection
+            - **Built:** $(date +%Y-%m-%d)
+            - **成功した署名方法:** ${{ env.WINNER }}
             
-            - **Patcher Version:** NPatch v${{ env.PATCHER_VERSION }}
-            - **Patch Mode:** Local Dex Injection
-            - **Build Date:** $(date +%Y-%m-%d)
-            
-            ### インストール方法
-            1. 既存のLINEアプリをアンインストール（データバックアップ推奨）
-            2. このAPKをダウンロードしてインストール
-            3. 初回起動時に権限を許可
+            このビルドで使用された署名方法を確認してください。
           files: ${{ env.FINAL_APK_NAME }}
           make_latest: true
-          draft: false
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
