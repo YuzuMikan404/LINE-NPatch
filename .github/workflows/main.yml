@@ -1,4 +1,4 @@
-name: NPatch LINE (7723mod)
+name: NPatch LINE
 
 on:
   workflow_dispatch:
