@@ -1,4 +1,4 @@
-name: NPatch LINE (Own Key)
+name: NPatch LINE (Own Key Fix)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
   # リポジトリ内の鍵を使用
   KEYSTORE_FILE: "keystore.jks"
-  # パスワードが "your_store_password" でない場合は書き換えてください
   STORE_PASSWORD: "your_store_password"
   KEY_ALIAS: "key0"
   KEY_PASSWORD: "your_store_password"
@@ -26,11 +25,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # NPatchの互換性のため JDK 17 を使用 (JDK 21での署名エラー回避)
-      - name: Set up JDK 17
+      # NPatch実行には Java 21 が必須
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       - name: Cache Tools
@@ -52,19 +51,9 @@ jobs:
         run: |
           mkdir -p tools
           REPO="7723mod/NPatch"
-          echo "Fetching latest release from $REPO..."
-          
           LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
-          
-          if [ -z "$LATEST_TAG" ]; then
-            echo "Error: Could not fetch latest tag from $REPO."
-            exit 1
-          fi
-          
-          echo "Latest NPatch version: $LATEST_TAG"
-          
           gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "tools/npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found, skipping."
+          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "tools/manager.apk" --clobber || echo "Manager APK not found."
 
       - name: Download LINE APK/APKM
         env:
@@ -73,67 +62,50 @@ jobs:
         run: |
           mkdir download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
-          
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
-          if [ -z "$FILE_PATH" ]; then
-            echo "Error: LINE APK version $VERSION not found."
-            exit 1
-          fi
           mv "$FILE_PATH" raw_input.file
-          echo "Original filename: $(basename "$FILE_PATH")"
 
       - name: Prepare APK (Merge Split APKs)
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
-            echo "Split APK detected. Merging..."
             unzip -o raw_input.file -d splitted_apk
             java -jar tools/APKEditor.jar m -i splitted_apk -o target.apk
           else
-            echo "Single APK detected."
             mv raw_input.file target.apk
           fi
 
-      - name: Apply NPatch
+      - name: Apply NPatch (with Direct Keystore)
         run: |
-          echo "Running NPatch..."
+          echo "Running NPatch with your keystore to bypass Java 21 internal key error..."
           mkdir -p output
           
-          CMD="java -jar tools/npatch.jar target.apk -f -o output"
-          
-          if [ -f "tools/manager.apk" ]; then
-            echo "Manager APK found, injecting..."
-            CMD="$CMD --manager tools/manager.apk"
-          fi
+          # NPatchの内部署名処理でエラーが出ないよう、最初から自分の鍵を指定します
+          # 7723mod版NPatchの引数形式に合わせて設定
+          CMD="java -jar tools/npatch.jar target.apk -f -o output \
+            --manager tools/manager.apk \
+            --keystore $KEYSTORE_FILE \
+            --password $STORE_PASSWORD \
+            --alias $KEY_ALIAS \
+            --keypass $KEY_PASSWORD"
           
           echo "Executing: $CMD"
           $CMD
           
           PATCHED_APK=$(find output -name "*patched*.apk" | head -n 1)
-          
           if [ -f "$PATCHED_APK" ]; then
             mv "$PATCHED_APK" target-patched.apk
-            echo "Patch success."
           else
             echo "Error: Patch output not found."
             exit 1
           fi
 
-      - name: Sign APK (With Your Keystore)
+      - name: Final Sign (V1/V2/V3)
         run: |
-          # リポジトリ内の鍵があるか確認
-          if [ ! -f "$KEYSTORE_FILE" ]; then
-             echo "Error: $KEYSTORE_FILE not found in repository!"
-             exit 1
-          fi
-
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
           
-          echo "Zipaligning..."
+          # 念のため、再度 zipalign と apksigner を通して完全な署名を確認します
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
           
-          echo "Signing with repository keystore..."
-          # JDK 17環境下で既存のJKS/PKCS12鍵を使って署名
-          # インストール互換性のため v1/v2/v3 すべて有効化
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$KEYSTORE_FILE" \
             --ks-pass pass:"$STORE_PASSWORD" \
@@ -146,7 +118,7 @@ jobs:
             --out signed_final.apk \
             target-aligned.apk
 
-      - name: Rename Output
+      - name: Rename and Release
         id: finalize
         run: |
           FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
@@ -158,9 +130,6 @@ jobs:
         with:
           tag_name: v${{ github.event.inputs.version }}
           name: LINE ${{ github.event.inputs.version }} (NPatch)
-          body: |
-            - **Version:** ${{ github.event.inputs.version }}
-            - **Method:** NPatch (7723mod)
           files: ${{ steps.finalize.outputs.filename }}
           make_latest: true
         env:
