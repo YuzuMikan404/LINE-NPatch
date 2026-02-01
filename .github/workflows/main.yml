@@ -95,18 +95,33 @@ jobs:
       - name: Finalize Filename
         run: |
           TODAY=$(date +%Y%m%d)
+          
+          # NPatchの最新タグからバージョン抜き出し（vを取る）
           PATCHER_VERSION="${LATEST_TAG#v}"
-          # ここで正しく入力バージョンを取得（これが大事！）
+          
+          # 入力バージョンを正しく取得（これが超重要！）
           INPUT_VERSION="${{ github.event.inputs.version }}"
+          
+          # ファイル名をシンプルに作る（クォートなし、エスケープなし）
           FINAL_NAME="LINE-\( {INPUT_VERSION}-NPatch-v \){PATCHER_VERSION}-${TODAY}.apk"
-          # デバッグ用に確認
-          echo "バージョン: ${INPUT_VERSION}"
-          echo "パッチャー: ${PATCHER_VERSION}"
-          echo "最終ファイル名: ${FINAL_NAME}"
-          mv signed_final.apk "$FINAL_NAME" || { echo "mv失敗！ signed_final.apkがないかも" && ls -la && exit 1; }
-          echo "FINAL_APK_NAME=$FINAL_NAME" >> $GITHUB_ENV
-          ls -lh "$FINAL_NAME" || echo "mv後にファイルが見つからないよ"
-    
+          
+          # デバッグ（次回のログでこれ見て確認できる）
+          echo "入力バージョン: ${INPUT_VERSION}"
+          echo "NPatchバージョン: ${PATCHER_VERSION}"
+          echo "作ったファイル名: ${FINAL_NAME}"
+          
+          # 署名済みAPKをリネーム
+          mv signed_final.apk "${FINAL_NAME}" || { 
+            echo "mv失敗！ signed_final.apkが見つからないかも"
+            ls -la
+            exit 1
+          }
+          
+          # GitHub環境変数にセット（Releaseで使う）
+          echo "FINAL_APK_NAME=${FINAL_NAME}" >> $GITHUB_ENV
+          
+          # 確認
+          ls -lh "${FINAL_NAME}" || echo "リネーム後にファイルが見つからないよ〜"    
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
