@@ -1,4 +1,4 @@
-name: NPatch LINE (Fixed Final)
+name: NPatch LINE
 
 on:
   workflow_dispatch:
@@ -6,20 +6,16 @@ on:
       version:
         description: 'LINEのバージョン (例: 15.12.2)'
         required: true
-        default: '15.12.2'
 
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
-  KEYSTORE_FILE: "keystore.jks"
-  STORE_PASSWORD: "your_store_password"
-  KEY_ALIAS: "key0"
-  KEY_PASSWORD: "your_store_password"
 
 jobs:
   patch-line:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -30,96 +26,138 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Download Tools
+      - name: Decode Keystore from Secrets (NPatch用 PKCS12推奨)
+        env:
+          NPATCH_KEYSTORE_BASE64: ${{ secrets.NPATCH_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'your_store_password' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'key0' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'your_store_password' }}
         run: |
-          mkdir -p tools
-          REPO="7723mod/NPatch"
-          LATEST_TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.jar" --output "npatch.jar" --clobber
-          gh release download "$LATEST_TAG" --repo "$REPO" --pattern "*.apk" --output "manager.apk" --clobber
-          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+          if [ -z "$NPATCH_KEYSTORE_BASE64" ]; then
+            echo "Error: NPATCH_KEYSTORE_BASE64 secret is not set"
+            echo "Please encode your keystore with: base64 -w0 keystore.jks"
+            exit 1
+          fi
+
+          mkdir -p keystore
+          echo "$NPATCH_KEYSTORE_BASE64" | base64 -d > keystore/keystore.jks
+          echo "✅ Keystore decoded (size: $(wc -c < keystore/keystore.jks) bytes)"
+
+          # JKS → PKCS12変換（NPatchはPKCS12を推奨・安定）
+          keytool -importkeystore \
+            -srckeystore keystore/keystore.jks \
+            -srcstoretype JKS \
+            -destkeystore keystore/keystore.p12 \
+            -deststoretype PKCS12 \
+            -srcstorepass "$STORE_PASSWORD" \
+            -deststorepass "$STORE_PASSWORD" \
+            -srcalias "$KEY_ALIAS" \
+            -destalias "$KEY_ALIAS" \
+            -srckeypass "$KEY_PASSWORD" \
+            -destkeypass "$KEY_PASSWORD" > /dev/null 2>&1 || echo "PKCS12変換スキップ（既にPKCS12かも）"
+
+          echo "KEYSTORE_P12=keystore/keystore.p12" >> $GITHUB_ENV
+          echo "STORE_PASSWORD=$STORE_PASSWORD" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+
+      - name: Download Latest NPatch Tool
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # NPatchのリポジトリから最新リリースのタグを取得
+          LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName')
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Error: Could not fetch latest tag from 7723mod/NPatch"
+            exit 1
+          fi
+          echo "Latest NPatch tag: $LATEST_TAG"
+
+          # 最新リリースからNPatchのjarファイルをダウンロード（パターンでマッチ）
+          gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "NPatch-*-release.jar" --output "NPatch.jar" --clobber
+          if [ ! -f "NPatch.jar" ]; then
+            echo "Error: No matching NPatch jar found in release $LATEST_TAG"
+            echo "Available assets:"
+            gh release view "$LATEST_TAG" --repo 7723mod/NPatch --json assets --jq '.assets[].name'
+            exit 1
+          fi
+          echo "✅ Downloaded latest NPatch: $(ls -l NPatch.jar)"
+
+          # APKEditor（APKM/XAPK対応用） - これは固定でOK（頻繁に更新されない）
+          wget -O APKEditor.jar \
+            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download LINE APK/APKM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
         run: |
           mkdir download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
+          if [ -z "$FILE_PATH" ]; then
+            echo "Error: No suitable file found for version $VERSION"
+            exit 1
+          fi
           mv "$FILE_PATH" raw_input.file
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event.inputs.version }}
+          echo "ORIGINAL_FILENAME=$(basename "$FILE_PATH")" >> $GITHUB_ENV
 
-      - name: Prepare APK (Merge & Strip)
+      - name: Prepare APK
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
-            echo "Merging Split APKs..."
+            echo "Detected split APKM/XAPK → merging with APKEditor"
             unzip -o raw_input.file -d splitted_apk
             java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
             mv raw_input.file target.apk
           fi
-          
-          # 重要：パッチ前に元の署名を完全に消去し、NPatchの解析エラーを防ぐ
-          zip -d target.apk "META-INF/*" || true
 
-      - name: Apply NPatch (Pure Patching)
+      - name: Apply NPatch
         run: |
-          echo "Applying NPatch without internal keystore..."
-          # 【重要】--keystore 引数は絶対に使いません。
-          # --skip-sign を付けて、パッチ（Dex注入）のみを確実に終わらせます。
-          # これで容量が減る「Portableフォールバック」を阻止します。
-          java -Xmx8G -jar npatch.jar target.apk --injectdex --manager manager.apk -f -o output --skip-sign
+          mkdir -p output
+          java -Xmx4G -jar NPatch.jar --manager target.apk \
+            -k ${{ env.KEYSTORE_P12 }} ${{ env.STORE_PASSWORD }} ${{ env.KEY_ALIAS }} ${{ env.KEY_PASSWORD }} \
+            -o output -f
 
-          # 出力ファイル名は環境によって変わるため、findで取得
-          PATCHED_FILE=$(find output -name "*.apk" | head -n 1)
-          if [ -z "$PATCHED_FILE" ]; then
-             echo "Error: NPatch failed to produce output!"
-             exit 1
+          PATCHED_FILE=$(find output -name "*-npatched.apk" -type f | head -n 1)
+          if [ -n "$PATCHED_FILE" ]; then
+            mv "$PATCHED_FILE" target-patched.apk
+            echo "✅ NPatch patching completed successfully"
+          else
+            echo "❌ No *-npatched.apk found → patching failed"
+            ls -la output || true
+            exit 1
           fi
-          mv "$PATCHED_FILE" target-patched.apk
 
-      - name: Sign APK (Zipalign & apksigner)
+      - name: Verify Signature
         run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
-          
-          echo "Zipaligning..."
-          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 target-patched.apk target-aligned.apk
-          
-          # 容量チェック（500MB前後であることを確認）
-          SIZE=$(stat -c%s "target-aligned.apk")
-          echo "Final aligned APK size: $SIZE bytes"
-
-          echo "Signing with apksigner (Official Tool)..."
-          # NPatchを介さず、本物の apksigner であなたの鍵を適用。
-          # これが最も確実にインストールできる署名方法です。
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "$KEYSTORE_FILE" \
-            --ks-pass pass:"$STORE_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass pass:"$KEY_PASSWORD" \
-            --min-sdk-version 26 \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out signed_final.apk \
-            target-aligned.apk
+          echo "🔍 Verifying output APK signature..."
+          jarsigner -verify -keystore \( {{ env.KEYSTORE_P12 }} -storepass " \){{ env.STORE_PASSWORD }}" target-patched.apk
+          if [ $? -eq 0 ]; then
+            echo "✅ Signature is VALID (matches the provided keystore)"
+          else
+            echo "❌ Signature verification FAILED"
+            exit 1
+          fi
 
       - name: Finalize Filename
         run: |
-          mv signed_final.apk LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
+          FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
+          mv target-patched.apk "$FINAL_NAME"
+          echo "Final APK: $FINAL_NAME"
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}-npatch
-          name: LINE ${{ github.event.inputs.version }} (NPatch)
+          tag_name: v${{ github.event.inputs.version }}-NPatch
+          name: LINE ${{ github.event.inputs.version }} - NPatch (Latest Tool)
           body: |
-            - **Mode:** Local Roll (Inject Dex)
-            - **Status:** Full Size (500MB+)
-            - **Signature:** V1/V2/V3 (apksigner)
-          files: LINE-${{ github.event.inputs.version }}-NPatch-Full.apk
+            **Patch Tool:** NPatch (最新自動取得版 - 7723mod fork of LSPatch)  
+            **Features:** Rootless LSPosed/Xposed module support  
+            **Signature:** Custom keystore (override enabled)  
+            **Installation:** Install as usual; use LSPosed Manager or compatible app to manage modules  
+            **Note:** NPatch uses 'npatch' meta key (different from original LSPatch). Tool version fetched automatically from latest release.
+          files: LINE-${{ github.event.inputs.version }}-NPatch.apk
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
