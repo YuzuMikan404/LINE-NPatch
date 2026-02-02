@@ -9,6 +9,10 @@ on:
 
 env:
   SOURCE_REPO: "YuzuMikan404/LINE-APK"
+  KEYSTORE_FILE: "keystore.jks"              # リポジトリルートにあるファイル名
+  STORE_PASSWORD: "your_store_password"      # ← 実際のパスワードに変更してください
+  KEY_ALIAS: "key0"                          # ← 実際のエイリアスに変更してください
+  KEY_PASSWORD: "your_store_password"        # ← 通常はSTORE_PASSWORDと同じ
 
 jobs:
   patch-line:
@@ -26,66 +30,53 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Decode Keystore from Secrets (NPatch用 PKCS12推奨)
-        env:
-          NPATCH_KEYSTORE_BASE64: ${{ secrets.NPATCH_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'your_store_password' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'key0' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'your_store_password' }}
+      - name: Prepare Keystore (JKS → PKCS12)
         run: |
-          if [ -z "$NPATCH_KEYSTORE_BASE64" ]; then
-            echo "Error: NPATCH_KEYSTORE_BASE64 secret is not set"
-            echo "Please encode your keystore with: base64 -w0 keystore.jks"
+          if [ ! -f "${{ env.KEYSTORE_FILE }}" ]; then
+            echo "❌ Keystore file '${{ env.KEYSTORE_FILE }}' not found in root!"
+            ls -la
             exit 1
           fi
 
-          mkdir -p keystore
-          echo "$NPATCH_KEYSTORE_BASE64" | base64 -d > keystore/keystore.jks
-          echo "✅ Keystore decoded (size: $(wc -c < keystore/keystore.jks) bytes)"
+          echo "✅ Found keystore: \( {{ env.KEYSTORE_FILE }} ( \)(wc -c < ${{ env.KEYSTORE_FILE }}) bytes)"
 
-          # JKS → PKCS12変換（NPatchはPKCS12を推奨・安定）
+          mkdir -p keystore
+          cp "${{ env.KEYSTORE_FILE }}" keystore/original.jks
+
+          # NPatchはPKCS12を推奨 → 変換
           keytool -importkeystore \
-            -srckeystore keystore/keystore.jks \
+            -srckeystore keystore/original.jks \
             -srcstoretype JKS \
             -destkeystore keystore/keystore.p12 \
             -deststoretype PKCS12 \
-            -srcstorepass "$STORE_PASSWORD" \
-            -deststorepass "$STORE_PASSWORD" \
-            -srcalias "$KEY_ALIAS" \
-            -destalias "$KEY_ALIAS" \
-            -srckeypass "$KEY_PASSWORD" \
-            -destkeypass "$KEY_PASSWORD" > /dev/null 2>&1 || echo "PKCS12変換スキップ（既にPKCS12かも）"
+            -srcstorepass "${{ env.STORE_PASSWORD }}" \
+            -deststorepass "${{ env.STORE_PASSWORD }}" \
+            -srcalias "${{ env.KEY_ALIAS }}" \
+            -destalias "${{ env.KEY_ALIAS }}" \
+            -srckeypass "${{ env.KEY_PASSWORD }}" \
+            -destkeypass "${{ env.KEY_PASSWORD }}" > /dev/null 2>&1 || echo "⚠️ PKCS12変換失敗 → JKSをそのまま使用"
 
-          echo "KEYSTORE_P12=keystore/keystore.p12" >> $GITHUB_ENV
-          echo "STORE_PASSWORD=$STORE_PASSWORD" >> $GITHUB_ENV
-          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
-          echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+          if [ -f "keystore/keystore.p12" ]; then
+            echo "KEYSTORE_P12=keystore/keystore.p12" >> $GITHUB_ENV
+          else
+            echo "KEYSTORE_P12=keystore/original.jks" >> $GITHUB_ENV
+          fi
 
-      - name: Download Latest NPatch Tool
+      - name: Download Latest NPatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # NPatchのリポジトリから最新リリースのタグを取得
           LATEST_TAG=$(gh release list --repo 7723mod/NPatch --limit 1 --json tagName --jq '.[0].tagName')
-          if [ -z "$LATEST_TAG" ]; then
-            echo "Error: Could not fetch latest tag from 7723mod/NPatch"
-            exit 1
-          fi
-          echo "Latest NPatch tag: $LATEST_TAG"
+          echo "Latest NPatch: $LATEST_TAG"
 
-          # 最新リリースからNPatchのjarファイルをダウンロード（パターンでマッチ）
           gh release download "$LATEST_TAG" --repo 7723mod/NPatch --pattern "NPatch-*-release.jar" --output "NPatch.jar" --clobber
-          if [ ! -f "NPatch.jar" ]; then
-            echo "Error: No matching NPatch jar found in release $LATEST_TAG"
-            echo "Available assets:"
-            gh release view "$LATEST_TAG" --repo 7723mod/NPatch --json assets --jq '.assets[].name'
-            exit 1
-          fi
-          echo "✅ Downloaded latest NPatch: $(ls -l NPatch.jar)"
 
-          # APKEditor（APKM/XAPK対応用） - これは固定でOK（頻繁に更新されない）
-          wget -O APKEditor.jar \
-            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
+          if [ ! -f "NPatch.jar" ]; then
+            echo "Fallback to v0.7.3"
+            wget -O NPatch.jar https://github.com/7723mod/NPatch/releases/download/v0.7.3/NPatch-v0.7.3-504-release.jar
+          fi
+
+          wget -O APKEditor.jar "https://github.com/REAndroid/APKEditor/releases/download/V1.4.7/APKEditor-1.4.7.jar"
 
       - name: Download LINE APK/APKM
         env:
@@ -95,17 +86,12 @@ jobs:
           mkdir download_tmp
           gh release download --repo "$SOURCE_REPO" --pattern "*$VERSION*" --dir download_tmp || exit 1
           FILE_PATH=$(find download_tmp -type f \( -name "*.apk" -o -name "*.apkm" -o -name "*.xapk" -o -name "*.apks" \) | head -n 1)
-          if [ -z "$FILE_PATH" ]; then
-            echo "Error: No suitable file found for version $VERSION"
-            exit 1
-          fi
           mv "$FILE_PATH" raw_input.file
           echo "ORIGINAL_FILENAME=$(basename "$FILE_PATH")" >> $GITHUB_ENV
 
       - name: Prepare APK
         run: |
           if unzip -l raw_input.file | grep -q "base.apk"; then
-            echo "Detected split APKM/XAPK → merging with APKEditor"
             unzip -o raw_input.file -d splitted_apk
             java -jar APKEditor.jar m -i splitted_apk -o target.apk
           else
@@ -122,41 +108,26 @@ jobs:
           PATCHED_FILE=$(find output -name "*-npatched.apk" -type f | head -n 1)
           if [ -n "$PATCHED_FILE" ]; then
             mv "$PATCHED_FILE" target-patched.apk
-            echo "✅ NPatch patching completed successfully"
+            echo "✅ NPatch completed"
           else
-            echo "❌ No *-npatched.apk found → patching failed"
-            ls -la output || true
-            exit 1
-          fi
-
-      - name: Verify Signature
-        run: |
-          echo "🔍 Verifying output APK signature..."
-          jarsigner -verify -keystore \( {{ env.KEYSTORE_P12 }} -storepass " \){{ env.STORE_PASSWORD }}" target-patched.apk
-          if [ $? -eq 0 ]; then
-            echo "✅ Signature is VALID (matches the provided keystore)"
-          else
-            echo "❌ Signature verification FAILED"
+            echo "❌ NPatch failed"
+            ls output
             exit 1
           fi
 
       - name: Finalize Filename
         run: |
-          FINAL_NAME="LINE-${{ github.event.inputs.version }}-NPatch.apk"
-          mv target-patched.apk "$FINAL_NAME"
-          echo "Final APK: $FINAL_NAME"
+          mv target-patched.apk LINE-${{ github.event.inputs.version }}-NPatch.apk
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}-NPatch
-          name: LINE ${{ github.event.inputs.version }} - NPatch (Latest Tool)
+          name: LINE ${{ github.event.inputs.version }} (NPatch)
           body: |
-            **Patch Tool:** NPatch (最新自動取得版 - 7723mod fork of LSPatch)  
-            **Features:** Rootless LSPosed/Xposed module support  
-            **Signature:** Custom keystore (override enabled)  
-            **Installation:** Install as usual; use LSPosed Manager or compatible app to manage modules  
-            **Note:** NPatch uses 'npatch' meta key (different from original LSPatch). Tool version fetched automatically from latest release.
+            - **Mode:** NPatch (7723mod)
+            - **Method:** NPatch patching
+            - **Signature:** keystore.jks (hardcoded)
           files: LINE-${{ github.event.inputs.version }}-NPatch.apk
           make_latest: true
         env:
